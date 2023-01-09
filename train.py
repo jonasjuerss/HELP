@@ -19,45 +19,21 @@ from data_generation.motifs import BinaryTreeMotif, HouseMotif, FullyConnectedMo
 
 CONV_TYPES = [DenseGCNConv]
 
-def train_epoch(optimizer, loader: DenseDataLoader, epoch: int, pooling_loss_weight: float, entropy_loss_weight: float):
-    model.train()
-    sum_loss = 0
-    sum_classification_loss = 0
-    sum_pooling_loss = 0
-    sum_entropy_loss = 0
-    for data in loader:
-        data = data.to(device)
-        optimizer.zero_grad()
-        out, pooling_loss, _ = model(data)
-        classification_loss = F.nll_loss(out, data.y.squeeze(1))
-        entropy_loss = model.entropy_loss()
-        loss = classification_loss + pooling_loss_weight * pooling_loss + entropy_loss_weight * entropy_loss
-
-        batch_size = data.y.size(0)
-        sum_loss += batch_size * float(loss)
-        sum_classification_loss += batch_size * float(classification_loss)
-        sum_pooling_loss += batch_size * float(pooling_loss)
-        sum_entropy_loss += batch_size * float(entropy_loss)
-
-        loss.backward()
-        optimizer.step()
-    dataset_len = len(loader.dataset)
-    log({"train_loss": sum_loss / dataset_len, "train_pooling_loss": sum_pooling_loss / dataset_len,
-         "train_entropy_loss": sum_entropy_loss / dataset_len,
-         "train_classification_loss": sum_classification_loss / dataset_len}, step=epoch, commit=False)
-
-
-@torch.no_grad()
-def test_epoch(loader: DenseDataLoader, epoch: int, pooling_loss_weight: float, entropy_loss_weight: float):
-    model.eval()
+def train_test_epoch(train: bool, optimizer, loader: DenseDataLoader, epoch: int, pooling_loss_weight: float, entropy_loss_weight: float):
+    if train:
+        model.train()
+    else:
+        model.eval()
     correct = 0
     sum_loss = 0
     sum_classification_loss = 0
     sum_pooling_loss = 0
     sum_entropy_loss = 0
-    # print(len(loader.dataset))
     for data in loader:
         data = data.to(device)
+        if train:
+            optimizer.zero_grad()
+
         out, pooling_loss, _ = model(data)
         classification_loss = F.nll_loss(out, data.y.squeeze(1))
         entropy_loss = model.entropy_loss()
@@ -68,19 +44,20 @@ def test_epoch(loader: DenseDataLoader, epoch: int, pooling_loss_weight: float, 
         sum_classification_loss += batch_size * float(classification_loss)
         sum_pooling_loss += batch_size * float(pooling_loss)
         sum_entropy_loss += batch_size * float(entropy_loss)
-        # print(out)
-        # print(out.argmax(dim=1))
-        # print(data.y)
-        # print((out.argmax(dim=1) == data.y.squeeze(1)).sum())
-        # print("b", int((out.argmax(dim=1) == data.y.squeeze(1)).sum()), batch_size)
         correct += int((out.argmax(dim=1) == data.y.squeeze(1)).sum())
 
-    # print(correct, len(loader.dataset))
+        if train:
+            loss.backward()
+            optimizer.step()
     dataset_len = len(loader.dataset)
-    log({"test_loss": sum_loss / dataset_len, "test_pooling_loss": sum_pooling_loss / dataset_len,
-         "test_entropy_loss": sum_entropy_loss / dataset_len,
-         "test_classification_loss": sum_classification_loss / dataset_len, "test_accuracy": correct / dataset_len},
-        step=epoch)
+    mode = "train" if train else "test"
+    log({f"{mode}_loss": sum_loss / dataset_len,
+         f"{mode}_pooling_loss": sum_pooling_loss / dataset_len,
+         f"{mode}_entropy_loss": sum_entropy_loss / dataset_len,
+         f"{mode}_classification_loss": sum_classification_loss / dataset_len,
+         f"{mode}_accuracy": correct / dataset_len},
+        step=epoch,
+        commit=not train)
 
 
 num_colors = 2
@@ -163,5 +140,5 @@ if __name__ == "__main__":
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
 
     for epoch in tqdm(range(args.num_epochs)):
-        train_epoch(optimizer, train_loader, epoch, args.pooling_loss_weight, args.entropy_loss_weight)
-        test_epoch(test_loader, epoch, args.pooling_loss_weight, args.entropy_loss_weight)
+        train_test_epoch(True, optimizer, train_loader, epoch, args.pooling_loss_weight, args.entropy_loss_weight)
+        train_test_epoch(False, optimizer, test_loader, epoch, args.pooling_loss_weight, args.entropy_loss_weight)
