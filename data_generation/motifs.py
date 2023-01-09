@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import json
 from typing import Union, Tuple, List
 
 import torch
@@ -5,8 +8,9 @@ from torch import Tensor
 from torch_geometric.utils import to_undirected
 
 from abc import ABC, abstractmethod
-from graphutils import adj_to_edge_index
 
+import data_generation.serializer as cs
+from graphutils import adj_to_edge_index
 
 class SparseGraph:
     def __init__(self, x: Tensor, edge_index: Tensor):
@@ -48,8 +52,15 @@ class SparseGraph:
         return self.x.shape[0]
 
 
-class Motif(ABC):
-    def __init__(self, num_colors: int, max_nodes : int):
+class Motif(cs.ArgSerializable):
+    def __init__(self, num_colors: int, max_nodes: int, args: dict):
+        """
+
+        :param num_colors: The total number of colors in the graph
+        :param max_nodes: the maximum number of nodes a sample of this motif can have
+        :param args: All keyword arguments the constructor of the subclass took. This is used for serialization
+        """
+        super().__init__(args)
         self.num_colors = num_colors
         self.max_nodes = max_nodes
 
@@ -61,16 +72,22 @@ class Motif(ABC):
 class HouseMotif(Motif):
 
     def __init__(self, roof_colors: List[int], basement_colors: List[int], num_colors: int):
-        super().__init__(num_colors, 5)
+        """
+          0
+         / \
+        1---2
+        |   |
+        3---4
+        :param roof_colors: Possible colors for the three roof nodes (will be chosen uniformly at random on sample())
+        :param basement_colors: Possible colors for the two basement nodes (will be chosen uniformly at random on sample())
+        :param num_colors: number of different colors in the overall graph
+        """
+        super().__init__(num_colors, 5,
+                         dict(roof_colors=roof_colors, basement_colors=basement_colors, num_colors=num_colors))
         self.roof_colors = roof_colors
         self.basement_colors = basement_colors
 
     def sample(self) -> SparseGraph:
-        #   0
-        #  / \
-        # 1---2
-        # |   |
-        # 3---4
         roof_color = _random_list_entry(self.roof_colors)
         basement_color = _random_list_entry(self.basement_colors)
         x = torch.zeros((5, self.num_colors))
@@ -82,7 +99,7 @@ class HouseMotif(Motif):
 
 class TriangleMotif(Motif):
     def __init__(self, colors: List[int], num_colors: int):
-        super().__init__(num_colors, 3)
+        super().__init__(num_colors, 3, dict(colors=colors, num_colors=num_colors))
         self.colors = colors
 
     def sample(self) -> SparseGraph:
@@ -98,7 +115,7 @@ class TriangleMotif(Motif):
 
 class FullyConnectedMotif(Motif):
     def __init__(self, num_nodes: int, colors: List[int], num_colors: int):
-        super().__init__(num_colors, num_nodes)
+        super().__init__(num_colors, num_nodes, dict(num_nodes=num_nodes, colors=colors, num_colors=num_colors))
         self.colors = colors
         self.num_nodes = num_nodes
 
@@ -114,7 +131,8 @@ class FullyConnectedMotif(Motif):
 
 class BinaryTreeMotif(Motif):
     def __init__(self, max_depth: int, colors: List[int], num_colors: int, random: bool = True):
-        super().__init__(num_colors, (2 ** (max_depth + 1)) - 1)
+        super().__init__(num_colors, (2 ** (max_depth + 1)) - 1,
+                         dict(max_depth=max_depth, colors=colors, num_colors=num_colors, random=random))
         self.max_depth = max_depth
         self.colors = colors
         self.random = random
@@ -143,6 +161,7 @@ class BinaryTreeMotif(Motif):
             result = result.merged_with(right)
             result.add_edges([[0, num_nodes], [num_nodes, 0]])
         return result
+
 
 def _random_list_entry(list: List[int]):
     return list[torch.randint(len(list), (1,))]

@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 from torch_geometric.nn import dense_diff_pool, DenseGCNConv
 
-from customnet import PoolBlock
+from custom_net import PoolBlock
 
 
 class DiffPoolBlock(PoolBlock):

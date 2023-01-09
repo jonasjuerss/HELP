@@ -1,3 +1,4 @@
+import abc
 from typing import List
 
 import torch
@@ -5,15 +6,14 @@ import torch.nn.functional as F
 import torch_explain as explain
 from torch_geometric.data import Data
 
-from diffpoolblock import DiffPoolBlock
-
-
-class PoolBlock(torch.nn.Module):
+class PoolBlock(torch.nn.Module, abc.ABC):
     pass
+
+from poolblocks.diffpool_block import DiffPoolBlock
 
 # Other example: https://github.com/pyg-team/pytorch_geometric/blob/master/examples/proteins_diff_pool.py
 class CustomNet(torch.nn.Module):
-    def __init__(self, num_node_features : int, num_classes : int, layer_sizes : List[List[int]],
+    def __init__(self, num_node_features: int, num_classes: int, layer_sizes: List[List[int]],
                  num_nodes_per_layer: List[int],
                  graph_classification = True,
                  use_entropy_layer=True,
@@ -43,7 +43,7 @@ class CustomNet(torch.nn.Module):
             self.pool_blocks.append(pooling_block_type(num_nodes_per_layer[i], layer_sizes[i], **pool_block_kwargs))
 
 
-    def forward(self, data : Data):
+    def forward(self, data: Data):
         x, adj, mask = data.x, data.adj, data.mask #to_dense_adj(data.edge_index)
         pooling_loss = 0
         pooling_assignments = []
@@ -64,4 +64,4 @@ class CustomNet(torch.nn.Module):
             raise NotImplementedError()
 
     def entropy_loss(self):
-        return explain.nn.functional.entropy_logic_loss(model.entropy_layer) if self.use_entropy_layer else 0
+        return explain.nn.functional.entropy_logic_loss(self.model.entropy_layer) if self.use_entropy_layer else 0
