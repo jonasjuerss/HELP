@@ -96,7 +96,7 @@ class UniqueMotifCategorizationDataset(CustomDataset):
             else:
                 counts.append(0)
         graph = self.template.sample(counts)
-        return Data(x=graph.x, edge_index=graph.edge_index, y=torch.tensor(y)[None])
+        return Data(x=graph.x, edge_index=graph.edge_index, y=torch.tensor(y)[None], num_nodes=graph.num_nodes())
 
 
 class CustomDatasetGraphTemplate(seri.ArgSerializable):

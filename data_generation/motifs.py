@@ -5,12 +5,16 @@ from typing import Union, Tuple, List
 
 import torch
 from torch import Tensor
+from torch_geometric.data import Data
 from torch_geometric.utils import to_undirected
 
 from abc import ABC, abstractmethod
 
 import data_generation.serializer as cs
 from graphutils import adj_to_edge_index
+import networkx as nx
+import matplotlib.pyplot as plt
+import torch_geometric
 
 class SparseGraph:
     def __init__(self, x: Tensor, edge_index: Tensor):
@@ -50,6 +54,12 @@ class SparseGraph:
 
     def num_nodes(self):
         return self.x.shape[0]
+
+    def render(self):
+        data = Data(x=self.x, edge_index=self.edge_index)
+        g = torch_geometric.utils.to_networkx(data, to_undirected=True)
+        nx.draw(g, with_labels=True)
+        plt.show()
 
 
 class Motif(cs.ArgSerializable):
@@ -156,7 +166,7 @@ class BinaryTreeMotif(Motif):
             result = result.merged_with(left)
             result.add_edges([[0, 1], [1, 0]])
         if not self.random or torch.rand(()) < (max_depth - 1) / max_depth:
-            num_nodes = x.shape[0]
+            num_nodes = result.num_nodes()
             right = self._random_binary_tree(max_depth - 1, color)
             result = result.merged_with(right)
             result.add_edges([[0, num_nodes], [num_nodes, 0]])
