@@ -76,10 +76,10 @@ def log_graphs(graphs: typing.List[Data],
                epoch: int,
                cluster_colors=torch.tensor([[1., 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1], [0, 0, 0]])[None, :, :]):
     # TODO log to tables in wandb instead of just figures. Add hover labels to see exact cluster assignment
-    # node_table = wandb.Table(["graph", "pool_step", "index", "r", "g", "b", "label"])
-    # edge_table = wandb.Table(["graph", "pool_step", "from", "to"])
+    node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "label"])
+    edge_table = wandb.Table(["graph", "pool_step", "source", "target"])
 
-    graphs_table = wandb.Table(columns=["graph", "pool_step", "class", "train_sample", "image"])
+    # graphs_table = wandb.Table(columns=["graph", "pool_step", "class", "train_sample", "image"])
     with torch.no_grad():
         for graph_i, data in enumerate(graphs):
             data = data.clone().detach().to(device)
@@ -94,28 +94,33 @@ def log_graphs(graphs: typing.List[Data],
 
                 # [num_nodes, 3] (intermediate dimensions: num_nodes x num_clusters x 3)
                 colors = torch.sum(assignment[:, :, None] * cluster_colors[:, :assignment.shape[1], :], dim=1)[:data.num_nodes, :]
-                # for i in range(colors.shape[0]):
-                #     node_table.add_data(graph_i, pool_step, i, colors[i, 0].item(), colors[i, 1].item(), colors[i, 2].item())
+                colors = torch.round(colors * 255).to(int)
+                for i in range(colors.shape[0]):
+                    node_table.add_data(graph_i, pool_step, i, colors[i, 0].item(),
+                                        colors[i, 1].item(), colors[i, 2].item(),
+                                        ", ".join([f"{m.item()* 100:.0f}%" for m in assignment[i].cpu()]))
+
 
                 # [3, num_edges] where the first row seems to be constant 0, indicating the graph membership
-                data.edge_index = adj_to_edge_index(data.adj)
-                # for i in range(edge_index.shape[1]):
-                #     edge_table.add_data(graph_i, pool_step, edge_index[1, i].item(), edge_index[2, i].item())
+                edge_index = adj_to_edge_index(data.adj)
+                for i in range(edge_index.shape[1]):
+                    edge_table.add_data(graph_i, pool_step, edge_index[0, i].item(), edge_index[1, i].item())
 
                 # Legacy:
-                im_io = io.BytesIO()
-                fig, ax = plt.subplots()
-                g = torch_geometric.utils.to_networkx(data, to_undirected=True)
-                nx.draw(g, node_color=colors, with_labels=True, ax=ax)#, pos=nx.spring_layout(g, seed=1))
-                fig.savefig(im_io, format='png')
-                plt.close(fig)
-                im = Image.open(im_io)
-                graphs_table.add_data(graph_i, pool_step, data.y.item(), graph_i < len(graphs) / 2, wandb.Image(im))
+                # data.edge_index = adj_to_edge_index(data.adj)
+                # im_io = io.BytesIO()
+                # fig, ax = plt.subplots()
+                # g = torch_geometric.utils.to_networkx(data, to_undirected=True)
+                # nx.draw(g, node_color=colors, with_labels=True, ax=ax)#, pos=nx.spring_layout(g, seed=1))
+                # fig.savefig(im_io, format='png')
+                # plt.close(fig)
+                # im = Image.open(im_io)
+                # graphs_table.add_data(graph_i, pool_step, data.y.item(), graph_i < len(graphs) / 2, wandb.Image(im))
 
     log(dict(
-        graphs_table=graphs_table
-        # node_table=node_table,
-        # edge_table=edge_table
+        # graphs_table=graphs_table
+        node_table=node_table,
+        edge_table=edge_table
     ), step=epoch)
 
 
