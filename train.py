@@ -30,7 +30,7 @@ from graphutils import adj_to_edge_index
 CONV_TYPES = [DenseGCNConv]
 device = None
 
-def train_test_epoch(train: bool, optimizer, loader: DenseDataLoader, epoch: int, pooling_loss_weight: float,
+def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: DenseDataLoader, epoch: int, pooling_loss_weight: float,
                      entropy_loss_weight: float):
     if train:
         model.train()
@@ -72,8 +72,7 @@ def train_test_epoch(train: bool, optimizer, loader: DenseDataLoader, epoch: int
         step=epoch,
         commit=not train)
 
-def log_graphs(graphs: typing.List[Data],
-               epoch: int,
+def log_graphs(model: CustomNet, graphs: typing.List[Data], epoch: int,
                cluster_colors=torch.tensor([[1., 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1], [0, 0, 0]])[None, :, :]):
     # TODO log to tables in wandb instead of just figures. Add hover labels to see exact cluster assignment
     node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "label"])
@@ -123,6 +122,11 @@ def log_graphs(graphs: typing.List[Data],
         edge_table=edge_table
     ), step=epoch)
 
+def log_formulas(model: CustomNet, train_loader: DataLoader, test_loader: DataLoader, class_names: typing.List[str],
+                epoch: int):
+    pass
+    # model.explain(train_loader, test_loader, class_names)
+
 
 
 num_colors = 2
@@ -137,7 +141,7 @@ if __name__ == "__main__":
                         help='The Adam learning rate to use.')
     parser.add_argument('--pooling_loss_weight', type=float, default=0.0,
                         help='The weight of the pooling loss.')
-    parser.add_argument('--entropy_loss_weight', type=float, default=0.0001,
+    parser.add_argument('--entropy_loss_weight', type=float, default=0,
                         help='The weight of the entropy loss in the explanation layer.')
     parser.add_argument('--wd', type=float, default=5e-4,
                         help='The Adam weight decay to use.')
@@ -166,15 +170,22 @@ if __name__ == "__main__":
     parser.add_argument('--test_set_size', type=int, default=128,
                         help='Number of samples for the training set.')
 
-    parser.add_argument('--graph_log_freq', type=int, default=10,
-                        help='Every how many epochs to log graphs to wandb.')
+    parser.add_argument('--graph_log_freq', type=int, default=50,
+                        help='Every how many epochs to log graphs to wandb. The final predictions will always be '
+                             'logged, except for if this is negative.')
+    parser.add_argument('--formula_log_freq', type=int, default=50,
+                        help='Every how many epochs to log explanations to wandb. The final predictions will always be '
+                             'logged, except for if this is negative.')
     parser.add_argument('--graphs_to_log', type=int, default=3,
                         help='How many graphs from the training and testing set to log.')
 
     parser.set_defaults(dense_data=True)
-    parser.add_argument('--spase_data', action='store_false', dest='dense_data',
+    parser.add_argument('--sparse_data', action='store_false', dest='dense_data',
                         help='Switches from a dense representation of graphs (dummy nodes are added so that each of '
                              'them has the same number of nodes) to a sparse one.')
+    parser.set_defaults(use_entropy_layer=True)
+    parser.add_argument('--no_entropy_layer', action='store_false', dest='use_entropy_layer',
+                        help='Whether to use the entropy layer as the final dense layer')
 
     parser.add_argument('--seed', type=int, default=1,
                         help='The seed used for pytorch. This also determines the dataset if generated randomly.')
@@ -195,8 +206,9 @@ if __name__ == "__main__":
     conv_type = next((x for x in CONV_TYPES if x.__name__ == args.conv_type), None)
     if conv_type is None:
         raise ValueError(f"There is no convolution type named {args.conv_type}!")
-    model = CustomNet(dataset.num_node_features, dataset.num_classes, layer_sizes=args.layer_sizes,
-                      num_nodes_per_layer=args.nodes_per_layer, use_entropy_layer=False, conv_type=conv_type).to(device)
+    model = CustomNet(dataset.num_node_features, dataset.num_classes, layer_sizes=args.layer_sizes, device=device,
+                      num_nodes_per_layer=args.nodes_per_layer, use_entropy_layer=args.use_entropy_layer,
+                      conv_type=conv_type).to(device)
 
     train_data = [dataset.sample(dense=args.dense_data) for _ in range(args.train_set_size)]
     test_data = [dataset.sample(dense=args.dense_data) for _ in range(args.test_set_size)]
@@ -214,8 +226,13 @@ if __name__ == "__main__":
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
 
     for epoch in tqdm(range(args.num_epochs)):
-        train_test_epoch(True, optimizer, train_loader, epoch, args.pooling_loss_weight, args.entropy_loss_weight)
+        train_test_epoch(True, model, optimizer, train_loader, epoch, args.pooling_loss_weight, args.entropy_loss_weight)
         if epoch % args.graph_log_freq == 0:
-            log_graphs(graphs_to_log, epoch)
-        train_test_epoch(False, optimizer, test_loader, epoch, args.pooling_loss_weight, args.entropy_loss_weight)
+            log_graphs(model, graphs_to_log, epoch)
+        if epoch % args.formula_log_freq == 0:
+            log_formulas(model, train_loader, test_loader, dataset.class_names, epoch)
+        train_test_epoch(False, model, optimizer, test_loader, epoch, args.pooling_loss_weight, args.entropy_loss_weight)
+
+    if args.graph_log_freq >= 0:
+        log_graphs(model, graphs_to_log, epoch)
 

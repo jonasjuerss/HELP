@@ -13,12 +13,14 @@ from data_generation.motifs import Motif, SparseGraph
 
 class CustomDataset(seri.ArgSerializable):
 
-    def __init__(self, max_nodes: int, num_classes: int, num_node_features: int, args: dict):
+    def __init__(self, max_nodes: int, num_classes: int, num_node_features: int, class_names: List[str],
+                args: dict):
         super().__init__(args)
         self.max_nodes = max_nodes
         self.num_classes = num_classes
         self.num_node_features = num_node_features
         self.dense_transform = transforms.ToDense(max_nodes)
+        self.class_names = class_names
 
     def _to_dense(self, data: Data):
         """
@@ -78,8 +80,13 @@ class UniqueMotifCategorizationDataset(CustomDataset):
         indicating for each of them whether ir is present or not.
         :param motif_probs: The probability of each motif to be present in the graph
         """
+        class_names = [""]
+        for m in possible_motifs:
+            class_names += [prev + ("" if prev == "" else "+") + m.__class__.__name__[:-5] for prev in class_names]
+        class_names[0] = "none"
+
         super().__init__(base_motif.max_nodes + sum([m.max_nodes for m in possible_motifs]),
-                         2 ** len(possible_motifs), base_motif.num_colors,
+                         2 ** len(possible_motifs), base_motif.num_colors, class_names,
                          dict(base_motif=base_motif, possible_motifs=possible_motifs, motif_probs=motif_probs))
         assert len(motif_probs) == len(possible_motifs)
         self.template = CustomDatasetGraphTemplate(base_motif, possible_motifs)
