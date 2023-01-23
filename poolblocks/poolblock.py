@@ -1,20 +1,25 @@
+import abc
+
+import torch
+
 from typing import List
 
 import torch
 import torch.nn.functional as F
 from torch_geometric.nn import dense_diff_pool, DenseGCNConv
 
-from custom_net import PoolBlock
-
+class PoolBlock(torch.nn.Module, abc.ABC):
+    pass
 
 class DiffPoolBlock(PoolBlock):
-    def __init__(self, num_output_nodes : int, embedding_sizes : List[int], conv_type : torch.nn.Module=DenseGCNConv):
+    def __init__(self, num_output_nodes: int, embedding_sizes: List[int], conv_type=DenseGCNConv):
         """
 
         :param sizes: [input_size, hidden_size1, hidden_size2, ..., output_size]
         """
         super().__init__()
-        # Sizes pf layers for generating the pooling embedding could be chosen completely arbitrary. Sharing the first layers and only using a different one for the last layer would be imaginable, too.
+        # Sizes of layers for generating the pooling embedding could be chosen completely arbitrary.
+        # Sharing the first layers and only using a different one for the last layer would be imaginable, too.
         pool_sizes = embedding_sizes.copy()
         pool_sizes[-1] = num_output_nodes
 
@@ -28,8 +33,6 @@ class DiffPoolBlock(PoolBlock):
 
     def forward(self, x, adj, mask=None):
         """
-
-        :param self:
         :param x:
         :param edge_index:
         :return:
@@ -52,3 +55,15 @@ class DiffPoolBlock(PoolBlock):
         #print(embedding.shape, edge_index.shape, pool.shape) [batch_nodes, num_features] [2, ?] []
         new_embeddings, new_adj, loss_l, loss_e = dense_diff_pool(embedding, adj, pool)
         return new_embeddings, new_adj, loss_l + loss_e, pool
+
+class ASAPBlock(PoolBlock):
+    pass
+
+
+__all__ = [DiffPoolBlock]
+
+def from_name(name: str):
+    for b in __all__:
+        if b.__name__ == name + "Block":
+            return b
+    raise ValueError(f"Unknown pooling type {name}!")

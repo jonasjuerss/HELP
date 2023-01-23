@@ -18,9 +18,11 @@ from torch_geometric.nn import DenseGCNConv
 from tqdm import tqdm
 
 import custom_logger
+import poolblocks.poolblock
 from data_generation.custom_dataset import UniqueMotifCategorizationDataset, CustomDataset
 from custom_net import CustomNet
 from custom_logger import log
+import output_layers
 import torch.nn.functional as F
 
 from data_generation.deserializer import from_dict
@@ -30,8 +32,8 @@ from graphutils import adj_to_edge_index
 CONV_TYPES = [DenseGCNConv]
 device = None
 
-def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: DenseDataLoader, epoch: int, pooling_loss_weight: float,
-                     entropy_loss_weight: float):
+def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: DenseDataLoader, epoch: int,
+                     pooling_loss_weight: float):
     if train:
         model.train()
     else:
@@ -40,23 +42,20 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: DenseData
     sum_loss = 0
     sum_classification_loss = 0
     sum_pooling_loss = 0
-    sum_entropy_loss = 0
     with nullcontext() if train else torch.no_grad():
         for data in loader:
             data = data.to(device)
+            batch_size = data.y.size(0)
             if train:
                 optimizer.zero_grad()
 
             out, pooling_loss, _ = model(data)
             classification_loss = F.nll_loss(out, data.y.squeeze(1))
-            entropy_loss = model.entropy_loss()
-            loss = classification_loss + pooling_loss_weight * pooling_loss + entropy_loss_weight * entropy_loss
+            loss = classification_loss + pooling_loss_weight * pooling_loss + model.custom_losses(batch_size)
 
-            batch_size = data.y.size(0)
             sum_loss += batch_size * float(loss)
             sum_classification_loss += batch_size * float(classification_loss)
             sum_pooling_loss += batch_size * float(pooling_loss)
-            sum_entropy_loss += batch_size * float(entropy_loss)
             correct += int((out.argmax(dim=1) == data.y.squeeze(1)).sum())
 
             if train:
@@ -64,13 +63,12 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: DenseData
                 optimizer.step()
     dataset_len = len(loader.dataset)
     mode = "train" if train else "test"
+    model.log_custom_losses(mode, epoch, dataset_len)
     log({f"{mode}_loss": sum_loss / dataset_len,
          f"{mode}_pooling_loss": sum_pooling_loss / dataset_len,
-         f"{mode}_entropy_loss": sum_entropy_loss / dataset_len,
          f"{mode}_classification_loss": sum_classification_loss / dataset_len,
          f"{mode}_accuracy": correct / dataset_len},
-        step=epoch,
-        commit=not train)
+        step=epoch)
 
 def log_graphs(model: CustomNet, graphs: typing.List[Data], epoch: int,
                cluster_colors=torch.tensor([[1., 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1], [0, 0, 0]])[None, :, :]):
@@ -124,8 +122,7 @@ def log_graphs(model: CustomNet, graphs: typing.List[Data], epoch: int,
 
 def log_formulas(model: CustomNet, train_loader: DataLoader, test_loader: DataLoader, class_names: typing.List[str],
                 epoch: int):
-    pass
-    # model.explain(train_loader, test_loader, class_names)
+    model.explain(train_loader, test_loader, class_names)
 
 
 
@@ -139,7 +136,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--lr', type=float, default=0.01,
                         help='The Adam learning rate to use.')
-    parser.add_argument('--pooling_loss_weight', type=float, default=0.0,
+    parser.add_argument('--pooling_loss_weight', type=float, default=0.5,
                         help='The weight of the pooling loss.')
     parser.add_argument('--entropy_loss_weight', type=float, default=0,
                         help='The weight of the entropy loss in the explanation layer.')
@@ -150,15 +147,19 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=64,
                         help='The batch size to use.')
     parser.add_argument('--add_layer', type=int, nargs='+', action='append',
-                        default=[[16, 16, 16, 16, 16], [16, 16, 16]], dest='layer_sizes',
+                        default=[[16, 16, 16, 16, 16, 4]], dest='layer_sizes',
                         help='The layer sizes to use. Example: --add_layer 16 32 --add_layer 32 64 16 results in a '
                              'network with 2 pooling steps where 5 message passes are performed before the first and ')
-    parser.add_argument('--nodes_per_layer', type=int, default=[5, 1],
+    parser.add_argument('--nodes_per_layer', type=int, default=[4],
                         help='The number of nodes after each pooling step for architectures like DiffPool which require'
                              ' to pre-specify that. Note that the last one should be 1 for classification')
 
     parser.add_argument('--conv_type', type=str, default="DenseGCNConv",
                         help='The type of graph convolution to use.')
+    parser.add_argument('--output_layer', type=str, default="EntropyClassifier",
+                        help='The type of graph convolution to use.')
+    parser.add_argument('--pooling_type', type=str, default="DiffPool",
+                        help='The type of pooling to use.')
     parser.add_argument('--pooling_config', type=json.loads, default="{}",
                         help="A json with further arguments for the pooling type used")
 
@@ -183,9 +184,6 @@ if __name__ == "__main__":
     parser.add_argument('--sparse_data', action='store_false', dest='dense_data',
                         help='Switches from a dense representation of graphs (dummy nodes are added so that each of '
                              'them has the same number of nodes) to a sparse one.')
-    parser.set_defaults(use_entropy_layer=True)
-    parser.add_argument('--no_entropy_layer', action='store_false', dest='use_entropy_layer',
-                        help='Whether to use the entropy layer as the final dense layer')
 
     parser.add_argument('--seed', type=int, default=1,
                         help='The seed used for pytorch. This also determines the dataset if generated randomly.')
@@ -206,8 +204,10 @@ if __name__ == "__main__":
     conv_type = next((x for x in CONV_TYPES if x.__name__ == args.conv_type), None)
     if conv_type is None:
         raise ValueError(f"There is no convolution type named {args.conv_type}!")
-    model = CustomNet(dataset.num_node_features, dataset.num_classes, layer_sizes=args.layer_sizes, device=device,
-                      num_nodes_per_layer=args.nodes_per_layer, use_entropy_layer=args.use_entropy_layer,
+    output_layer = output_layers.from_name(args.output_layer)
+    model = CustomNet(dataset.num_node_features, dataset.num_classes, args=args, device=device,
+                      output_layer_type=output_layer,
+                      pooling_block_type=poolblocks.poolblock.from_name(args.pooling_type),
                       conv_type=conv_type).to(device)
 
     train_data = [dataset.sample(dense=args.dense_data) for _ in range(args.train_set_size)]
@@ -226,13 +226,15 @@ if __name__ == "__main__":
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
 
     for epoch in tqdm(range(args.num_epochs)):
-        train_test_epoch(True, model, optimizer, train_loader, epoch, args.pooling_loss_weight, args.entropy_loss_weight)
+        train_test_epoch(True, model, optimizer, train_loader, epoch, args.pooling_loss_weight)
         if epoch % args.graph_log_freq == 0:
             log_graphs(model, graphs_to_log, epoch)
         if epoch % args.formula_log_freq == 0:
             log_formulas(model, train_loader, test_loader, dataset.class_names, epoch)
-        train_test_epoch(False, model, optimizer, test_loader, epoch, args.pooling_loss_weight, args.entropy_loss_weight)
+        train_test_epoch(False, model, optimizer, test_loader, epoch, args.pooling_loss_weight)
 
     if args.graph_log_freq >= 0:
         log_graphs(model, graphs_to_log, epoch)
+    if args.formula_log_freq >= 0:
+        log_formulas(model, train_loader, test_loader, dataset.class_names, epoch)
 
