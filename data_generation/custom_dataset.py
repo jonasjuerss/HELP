@@ -4,6 +4,7 @@ from abc import abstractmethod
 from typing import List, Tuple
 
 import torch
+from torch.distributions import Categorical
 from torch_geometric import transforms
 from torch_geometric.data import Data
 
@@ -72,6 +73,48 @@ class CustomDataset(seri.ArgSerializable):
 
 
 class UniqueMotifCategorizationDataset(CustomDataset):
+
+    def __init__(self, base_motif: Motif, possible_motifs: List[Motif], motif_probs: List[List[float]]):
+        """
+        :param base_motif: The motif to attach others to
+        :param possible_motifs: The motifs that could be present. there will be 2 ^ len(possible_motifs) classes,
+        indicating for each of them whether it is present or not.
+        :param motif_probs: For each motif m a list of length max_occurrences_m + 1 that indicates the probabilitity of
+        it occurring 0, 1, 2, ..., max_occurrences_m times in that order
+        """
+        # backward compatibility:
+        if len(possible_motifs) > 0 and not isinstance(possible_motifs, list):
+            possible_motifs = [[1 - p, p] for p in motif_probs]
+
+        class_names = [""]
+        for m in possible_motifs:
+            class_names += [prev + ("" if prev == "" else "+") + m.__class__.__name__[:-5] for prev in class_names]
+        class_names[0] = "none"
+
+        super().__init__(base_motif.max_nodes + sum([m.max_nodes for m in possible_motifs]),
+                         2 ** len(possible_motifs), base_motif.num_colors, class_names,
+                         dict(base_motif=base_motif, possible_motifs=possible_motifs, motif_probs=motif_probs))
+        assert len(motif_probs) == len(possible_motifs)
+        self.template = CustomDatasetGraphTemplate(base_motif, possible_motifs)
+        self.motif_probs = motif_probs
+
+    def _sample(self) -> Data:
+        counts = []
+        y = 0
+        for probs in self.motif_probs:
+            y *= 2
+            num_motif = Categorical(probs=torch.tensor(probs)).sample()
+            if num_motif > 0:
+                y += 1
+            counts.append(num_motif)
+        graph = self.template.sample(counts)
+        return Data(x=graph.x, edge_index=graph.edge_index, y=torch.tensor(y)[None], num_nodes=graph.num_nodes())
+
+class UniqueMultipleOccurrencesMotifCategorizationDataset(CustomDataset):
+    """
+    Same classes as UniqueMotifCategorizationDataset but motifs may als occur multiple times.
+    For categorization, it is still only relevant if a motif occured at least once
+    """
 
     def __init__(self, base_motif: Motif, possible_motifs: List[Motif], motif_probs: List[float]):
         """

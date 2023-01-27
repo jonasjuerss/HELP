@@ -137,7 +137,7 @@ num_colors = 2
 current_dataset = UniqueMotifCategorizationDataset(BinaryTreeMotif(5, [0], num_colors),
                                                    [HouseMotif([1], [1], num_colors),
                                                     FullyConnectedMotif(5, [1], num_colors)],
-                                                   [0.6, 0.6])
+                                                   [[0.25, 0.25, 0.25, 0.25], [0.25, 0.25, 0.25, 0.25]])
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
