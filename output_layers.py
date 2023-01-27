@@ -106,7 +106,7 @@ class EntropyClassifier(Classifier):
             # data.x: [batch_size, nodes_per_graph, input_feature_size/num_colors]
             # data.y: [batch_size, 1]
             # concepts:
-            concepts, _, _ = graph_model(data.to(self.device))
+            concepts, _, _, _ = graph_model(data.to(self.device))
             xs = torch.cat((xs, self.prep(concepts)), dim=0)
             ys = torch.cat((ys, data.y.squeeze(1)), dim=0)
             train_samples += data.y.shape[0]

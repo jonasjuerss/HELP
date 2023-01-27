@@ -47,10 +47,23 @@ class CustomNet(torch.nn.Module, abc.ABC):
         self.output_layer.log_custom_losses(mode, epoch, dataset_length)
 
     def forward(self, data: Data):
-        concepts, pooling_loss, pooling_assignments = self.graph_network(data)
+        ndim = data.x.ndim
+        if ndim == 2:
+            data.x = data.x[None, ...]
+            data.y = data.y[None, ...]
+            data.mask = data.mask[None, ...]
+            data.num_nodes = torch.tensor([data.num_nodes], device=data.x.device)
+            if data.adj is not None:
+                data.adj = data.adj[None, ...]
+            if data.edge_index is not None:
+                data.edge_index = data.edge_index[None, ...]
+        elif ndim > 3:
+            print("Multiple batch dimensions currently might not work as expected!")
+
+        concepts, pooling_loss, pooling_assignments, pooling_activations = self.graph_network(data)
         # IMPORTANT: that only works because num_nodes_per_layer[-1] == 1
         x = self.output_layer(concepts)
-        return F.log_softmax(x, dim=1), pooling_loss, pooling_assignments
+        return F.log_softmax(x, dim=1), concepts, pooling_loss, pooling_assignments, pooling_activations
 
     def explain(self, train_loader: DataLoader, test_loader, class_names: List[str]):
         return self.output_layer.explain(self.graph_network, train_loader, test_loader, class_names)

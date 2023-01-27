@@ -38,13 +38,17 @@ class DiffPoolBlock(PoolBlock):
         :return:
         """
         embedding, pool = x, x
-        for conv in self.embedding_convs[:-1]:
+        for conv in self.embedding_convs:
             # print("i", embedding.shape, adj.shape)
             embedding = F.relu(conv(embedding, adj))
             # embedding = F.dropout(embedding, training=self.training)
-        embedding = F.softmax(self.embedding_convs[-1](embedding, adj), dim=1)
-        max_vals, _ = torch.max(embedding, dim=1, keepdim=True)
-        embedding = embedding / max_vals
+
+        # Don't need the softmax part from http://arxiv.org/abs/2207.13586 as my concepts are determined by the clusters
+        # we map to. These could be found using embeddings (separately learned as here in DiffPool or just the normal
+        # ones) but don't have to (like in DiffPool)
+        # embedding = F.softmax(self.embedding_convs[-1](embedding, adj), dim=1)
+        # max_vals, _ = torch.max(embedding, dim=1, keepdim=True)
+        # embedding = embedding / max_vals
 
         for conv in self.pool_convs[:-1]:
             pool = F.relu(conv(pool, adj))
@@ -53,8 +57,9 @@ class DiffPoolBlock(PoolBlock):
 
         # TODO try dividing the softmax by its maximum value similar to the concepts
         #print(embedding.shape, edge_index.shape, pool.shape) [batch_nodes, num_features] [2, ?] []
+        # embedding = torch.max(adj, dim=1)[0][:, :, None] # [batch_size, num_nodes, 1] that is 1 iff node has any neighbours
         new_embeddings, new_adj, loss_l, loss_e = dense_diff_pool(embedding, adj, pool)
-        return new_embeddings, new_adj, loss_l + loss_e, pool
+        return new_embeddings, new_adj, loss_l + loss_e, pool, embedding
 
 class ASAPBlock(PoolBlock):
     pass
