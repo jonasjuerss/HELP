@@ -186,6 +186,10 @@ if __name__ == "__main__":
                              'logged, except for if this is negative.')
     parser.add_argument('--graphs_to_log', type=int, default=3,
                         help='How many graphs from the training and testing set to log.')
+    parser.add_argument('--forced_embeddings', type=float, default=None,
+                        help='For debugging. If set, embeddings will not be calculated. Instead, all embeddings of '
+                             'nodes with neighbours will be set to the given number and all nodes without neighbours '
+                             'will have embedding 0.')
 
     parser.set_defaults(dense_data=True)
     parser.add_argument('--sparse_data', action='store_false', dest='dense_data',

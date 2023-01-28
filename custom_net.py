@@ -25,7 +25,7 @@ class CustomNet(torch.nn.Module, abc.ABC):
             assert layer_sizes[i][-1] == layer_sizes[i + 1][0],\
                 "Each block must end in the same number of features as the next one has"
         self.graph_network = GraphPoolingNetwork(num_node_features, layer_sizes, num_nodes_per_layer,
-                                                 pooling_block_type, conv_type)
+                                                 pooling_block_type, conv_type, args.forced_embeddings)
         self.output_layer = output_layer_type(num_nodes_per_layer[-1], layer_sizes[-1][-1], num_classes, device, args)
 
     def custom_losses(self, batch_size: int) -> Tensor:
