@@ -14,7 +14,7 @@ from graph_pooling_network import GraphPoolingNetwork
 # Other example: https://github.com/pyg-team/pytorch_geometric/blob/master/examples/proteins_diff_pool.py
 class CustomNet(torch.nn.Module, abc.ABC):
     def __init__(self, num_node_features: int, num_classes: int, args: Namespace, device, output_layer_type,
-                 pooling_block_type, conv_type):
+                 pooling_block_type, conv_type, activation_function):
         super().__init__()
         layer_sizes = args.layer_sizes
         num_nodes_per_layer = args.nodes_per_layer
@@ -25,7 +25,9 @@ class CustomNet(torch.nn.Module, abc.ABC):
             assert layer_sizes[i][-1] == layer_sizes[i + 1][0],\
                 "Each block must end in the same number of features as the next one has"
         self.graph_network = GraphPoolingNetwork(num_node_features, layer_sizes, num_nodes_per_layer,
-                                                 pooling_block_type, conv_type, args.forced_embeddings)
+                                                 pooling_block_type, conv_type=conv_type,
+                                                 activation_function=activation_function,
+                                                 forced_embeddings=args.forced_embeddings)
         self.output_layer = output_layer_type(num_nodes_per_layer[-1], layer_sizes[-1][-1], num_classes, device, args)
 
     def custom_losses(self, batch_size: int) -> Tensor:

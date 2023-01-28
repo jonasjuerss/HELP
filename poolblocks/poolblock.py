@@ -13,7 +13,7 @@ class PoolBlock(torch.nn.Module, abc.ABC):
 
 class DiffPoolBlock(PoolBlock):
     def __init__(self, num_output_nodes: int, embedding_sizes: List[int], conv_type=DenseGCNConv,
-                 forced_embeddings=None):
+                 activation_function=F.relu, forced_embeddings=None):
         """
 
         :param sizes: [input_size, hidden_size1, hidden_size2, ..., output_size]
@@ -23,7 +23,9 @@ class DiffPoolBlock(PoolBlock):
         # Sharing the first layers and only using a different one for the last layer would be imaginable, too.
         pool_sizes = embedding_sizes.copy()
         pool_sizes[-1] = num_output_nodes
+
         self.forced_embeddings = forced_embeddings
+        self.activation_function = activation_function
         self.embedding_convs = torch.nn.ModuleList()
         self.pool_convs = torch.nn.ModuleList()
         for i in range(len(embedding_sizes) - 1):
@@ -42,7 +44,7 @@ class DiffPoolBlock(PoolBlock):
         if self.forced_embeddings is None:
             for conv in self.embedding_convs:
                 # print("i", embedding.shape, adj.shape)
-                embedding = F.relu(conv(embedding, adj))
+                embedding = self.activation_function(conv(embedding, adj))
                 # embedding = F.dropout(embedding, training=self.training)
 
             # Don't need the softmax part from http://arxiv.org/abs/2207.13586 as my concepts are determined by the clusters
@@ -56,7 +58,7 @@ class DiffPoolBlock(PoolBlock):
             embedding = self.forced_embeddings * torch.max(adj, dim=1)[0][:, :, None]
 
         for conv in self.pool_convs[:-1]:
-            pool = F.relu(conv(pool, adj))
+            pool = self.activation_function(conv(pool, adj))
             # pool = F.dropout(pool, training=self.training)
         pool = self.pool_convs[-1](pool, adj)
 

@@ -154,7 +154,7 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=64,
                         help='The batch size to use.')
     parser.add_argument('--add_layer', type=int, nargs='+', action='append',
-                        default=[[16, 16, 16, 16, 16, 1]], dest='layer_sizes',
+                        default=[[16, 16, 16, 16, 16, 4]], dest='layer_sizes',
                         help='The layer sizes to use. Example: --add_layer 16 32 --add_layer 32 64 16 results in a '
                              'network with 2 pooling steps where 5 message passes are performed before the first and ')
     parser.add_argument('--nodes_per_layer', type=int, default=[4],
@@ -190,6 +190,8 @@ if __name__ == "__main__":
                         help='For debugging. If set, embeddings will not be calculated. Instead, all embeddings of '
                              'nodes with neighbours will be set to the given number and all nodes without neighbours '
                              'will have embedding 0.')
+    parser.add_argument('--gnn_activation', type=str, default="relu",
+                        help='Activation function to be used in between the GNN layers')
 
     parser.set_defaults(dense_data=True)
     parser.add_argument('--sparse_data', action='store_false', dest='dense_data',
@@ -216,10 +218,11 @@ if __name__ == "__main__":
     if conv_type is None:
         raise ValueError(f"There is no convolution type named {args.conv_type}!")
     output_layer = output_layers.from_name(args.output_layer)
+    gnn_activation= getattr(torch.nn.functional, args.gnn_activation)
     model = CustomNet(dataset.num_node_features, dataset.num_classes, args=args, device=device,
                       output_layer_type=output_layer,
                       pooling_block_type=poolblocks.poolblock.from_name(args.pooling_type),
-                      conv_type=conv_type).to(device)
+                      conv_type=conv_type, activation_function=gnn_activation).to(device)
 
     train_data = [dataset.sample(dense=args.dense_data) for _ in range(args.train_set_size)]
     test_data = [dataset.sample(dense=args.dense_data) for _ in range(args.test_set_size)]

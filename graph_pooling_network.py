@@ -11,15 +11,15 @@ from poolblocks.poolblock import DiffPoolBlock
 # Other example: https://github.com/pyg-team/pytorch_geometric/blob/master/examples/proteins_diff_pool.py
 class GraphPoolingNetwork(torch.nn.Module):
     def __init__(self, num_node_features: int, layer_sizes: List[List[int]],
-                 num_nodes_per_layer: List[int],
-                 pooling_block_type=DiffPoolBlock,
-                 conv_type=DenseGCNConv, forced_embeddings: float=None):
+                 num_nodes_per_layer: List[int], pooling_block_type=DiffPoolBlock,
+                 conv_type=DenseGCNConv, activation_function=torch.nn.functional.relu, forced_embeddings: float=None):
         super().__init__()
         self.layer_sizes = layer_sizes
         self.num_concepts = layer_sizes[-1][-1]
         self.pool_blocks = torch.nn.ModuleList()
         for i in range(len(layer_sizes)):
             self.pool_blocks.append(pooling_block_type(num_nodes_per_layer[i], layer_sizes[i], conv_type=conv_type,
+                                                       activation_function=activation_function,
                                                        forced_embeddings=forced_embeddings))
 
 
