@@ -14,7 +14,7 @@ from torch_geometric.data import Data
 import wandb
 from torch_geometric import transforms
 from torch_geometric.loader import DataLoader, DenseDataLoader
-from torch_geometric.nn import DenseGCNConv
+from torch_geometric.nn import DenseGCNConv, GCNConv
 from tqdm import tqdm
 
 import custom_logger
@@ -29,7 +29,8 @@ from data_generation.deserializer import from_dict
 from data_generation.motifs import BinaryTreeMotif, HouseMotif, FullyConnectedMotif
 from graphutils import adj_to_edge_index
 
-CONV_TYPES = [DenseGCNConv]
+DENSE_CONV_TYPES = [DenseGCNConv]
+SPARSE_CONV_TYPES = [GCNConv]
 device = None
 
 def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: DenseDataLoader, epoch: int,
@@ -157,18 +158,26 @@ if __name__ == "__main__":
                         default=[[16, 16, 16, 16, 16, 4]], dest='layer_sizes',
                         help='The layer sizes to use. Example: --add_layer 16 32 --add_layer 32 64 16 results in a '
                              'network with 2 pooling steps where 5 message passes are performed before the first and ')
-    parser.add_argument('--nodes_per_layer', type=int, default=[4],
-                        help='The number of nodes after each pooling step for architectures like DiffPool which require'
-                             ' to pre-specify that. Note that the last one should be 1 for classification')
+    parser.add_argument('--add_pool_block', type=json.loads, nargs='+', action='append',
+                        # default=[{"num_output_layers": [4]}],
+                        default=[{"num_output_nodes": 4}],
+                        dest='pool_block_args',
+                        help="Additional arguments for each pool block")
+    # parser.add_argument('--nodes_per_layer', type=int, default=[4],
+    #                     help='The number of nodes after each pooling step for architectures like DiffPool which require'
+    #                          ' to pre-specify that. Note that the last one should be 1 for classification')
 
     parser.add_argument('--conv_type', type=str, default="DenseGCNConv",
                         help='The type of graph convolution to use.')
     parser.add_argument('--output_layer', type=str, default="DenseClassifier",
                         help='The type of graph convolution to use.')
+    parser.add_argument('--output_layer_merge', type=str, default=["flatten", "none", "sum", "avg"][0],
+                        help='How to merge the output encodings of all nodes after the last pooling step for the final '
+                             'classification layer. \"flatten\" only works if the number of clusters in the last graph '
+                             'is constant/independent of the input graph size and \"none\" only if the chosen '
+                             'classifier can deal with a set of inputs.')
     parser.add_argument('--pooling_type', type=str, default="DiffPool",
                         help='The type of pooling to use.')
-    parser.add_argument('--pooling_config', type=json.loads, default="{}",
-                        help="A json with further arguments for the pooling type used")
 
     parser.add_argument('--dataset', type=json.loads, default=current_dataset.__dict__(),
                         help="A json that defines the current dataset")
@@ -190,7 +199,7 @@ if __name__ == "__main__":
                         help='For debugging. If set, embeddings will not be calculated. Instead, all embeddings of '
                              'nodes with neighbours will be set to the given number and all nodes without neighbours '
                              'will have embedding 0.')
-    parser.add_argument('--gnn_activation', type=str, default="relu",
+    parser.add_argument('--gnn_activation', type=str, default="leaky_relu",
                         help='Activation function to be used in between the GNN layers')
 
     parser.set_defaults(dense_data=True)
@@ -213,15 +222,15 @@ if __name__ == "__main__":
 
     dataset = typing.cast(CustomDataset, from_dict(args.dataset))
 
-
+    CONV_TYPES = DENSE_CONV_TYPES if args.dense_data else SPARSE_CONV_TYPES
     conv_type = next((x for x in CONV_TYPES if x.__name__ == args.conv_type), None)
     if conv_type is None:
-        raise ValueError(f"There is no convolution type named {args.conv_type}!")
+        raise ValueError(f"No convolution type named \"{args.conv_type}\" found for dense_data={args.dense_data}!")
     output_layer = output_layers.from_name(args.output_layer)
-    gnn_activation= getattr(torch.nn.functional, args.gnn_activation)
+    gnn_activation = getattr(torch.nn.functional, args.gnn_activation)
     model = CustomNet(dataset.num_node_features, dataset.num_classes, args=args, device=device,
                       output_layer_type=output_layer,
-                      pooling_block_type=poolblocks.poolblock.from_name(args.pooling_type),
+                      pooling_block_type=poolblocks.poolblock.from_name(args.pooling_type, args.dense_data),
                       conv_type=conv_type, activation_function=gnn_activation).to(device)
 
     train_data = [dataset.sample(dense=args.dense_data) for _ in range(args.train_set_size)]
@@ -235,7 +244,6 @@ if __name__ == "__main__":
         train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True)
         test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=True)
         log_graph_loader = DataLoader(graphs_to_log, batch_size=1, shuffle=False)
-        raise NotImplementedError("Non-dense data is easy to implement if necessary")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
 

@@ -1,6 +1,6 @@
 import abc
 from argparse import Namespace
-from typing import Union, List
+from typing import Union, List, Sequence
 
 import torch
 from torch import Tensor
@@ -14,26 +14,29 @@ from graph_pooling_network import GraphPoolingNetwork
 
 
 class Classifier(torch.nn.Module, abc.ABC):
-    def __init__(self, num_output_nodes: Union[int, None], features_per_output_node: int,
-                 num_classes: int, device, args: Namespace):
+    def __init__(self, input_size: Sequence[int], num_classes: int, device, args: Namespace):
         """
-
-        :param num_output_nodes: The number of nodes after the last pooling layer. Can also be None for layers that
-        support a variable number of nodes
-        :param features_per_output_node: The number of features in each output node
+        :param num_output_nodes: input shape of the layer. For example [features_per_node] (merge: sum/avg/...),
+        [features_per_node * num_output_nodes] (merge: flatten) or [num_output_nodes/None, features_per_node]
+        (merge: none). Note that the None here indicates an unknown number of output nodes which is useful for layers on
+        sets like DCR.
         :param num_classes: The number of classes to predict
         :param args: Commandline arguments for additional things like certain loss weights (e.g. entropy)
         """
         super().__init__()
-        self.num_output_nodes = num_output_nodes
-        self.features_per_output_layer = features_per_output_node
+        self.input_size = input_size
         self.num_classes = num_classes
         self.device = device
 
     @abc.abstractmethod
     def forward(self, concepts: Tensor) -> Tensor:
         """
-        :param concepts: [batch_size, num_output_nodes, features_per_output_node]
+        :param concepts: <ul>
+            <li>either: [batch_size, num_output_nodes, features_per_output_node] (for output_layer_merge="none")</li>
+            <li>or: [batch_size, features_per_output_node] (for output_layer_merge="max", "sum")</li>
+            <li>or: [batch_size, num_output_nodes * features_per_output_node] (for output_layer_merge="flatten")</li></ul>
+            Where the last 2 cases can be handled transparently as long as the number of nodes in the last graph is
+            constant
         :return: [batch_size, num_classes]
         """
         pass
@@ -62,14 +65,12 @@ class DenseClassifier(Classifier):
     """
     Concatenates all output node features and feeds them to a dense layer
     """
-    def __init__(self, num_output_nodes: Union[int, None], features_per_output_node: Union[int, None],
-                 num_classes: int, device, args: Namespace):
-        super().__init__(num_output_nodes, features_per_output_node, num_classes, device, args)
-        if num_output_nodes is None:
-            raise ValueError(f"{self.__class__.__name__} does not support a variable number of output nodes!")
-        self.layer = torch.nn.Sequential(
-            torch.nn.Flatten(start_dim=-2, end_dim=-1),  # merges the last two dimensions
-            torch.nn.Linear(num_output_nodes * features_per_output_node, num_classes))
+    def __init__(self, input_size: Sequence[int], num_classes: int, device, args: Namespace):
+        super().__init__(input_size, num_classes, device, args)
+        if len(input_size) != 1:
+            raise ValueError(f"{self.__class__.__name__} currently does not support more than 1 input dimension "
+                             f"({input_size} given)!")
+        self.layer = torch.nn.Linear(*input_size, num_classes)
 
     def forward(self, concepts: Tensor) -> Tensor:
         return self.layer(concepts)
@@ -79,23 +80,22 @@ class EntropyClassifier(Classifier):
     """
     Concatenates all output node features and feeds them to an entropy layer
     """
-    def __init__(self, num_output_nodes: Union[int, None], features_per_output_node: Union[int, None],
-                 num_classes: int, device, args: Namespace):
-        super().__init__(num_output_nodes, features_per_output_node, num_classes, device, args)
-        if num_output_nodes is None:
-            raise ValueError(f"{self.__class__.__name__} does not support a variable number of output nodes!")
+    def __init__(self, input_size: Sequence[int], num_classes: int, device, args: Namespace):
+        super().__init__(input_size, num_classes, device, args)
+        if len(input_size) != 1:
+            raise ValueError(f"{self.__class__.__name__} currently does not support more than 1 input dimension "
+                             f"({input_size} given)!")
         self.entropy_loss_weight = args.entropy_loss_weight
         self.sum_entropy_loss = 0
-        self.prep = torch.nn.Flatten(start_dim=-2, end_dim=-1)  # merges the last two dimensions
         self.layer = torch.nn.Sequential(
-            EntropyLinear(num_output_nodes * features_per_output_node, 1, n_classes=num_classes),
+            EntropyLinear(input_size[0], 1, n_classes=num_classes),
             torch.nn.Flatten(1))
 
     def forward(self, concepts: Tensor) -> Tensor:
-        return self.layer(self.prep(concepts))
+        return self.layer(concepts)
 
     def explain(self, graph_model: GraphPoolingNetwork, train_loader: DataLoader, test_loader, class_names: List[str]):
-        return # TODO fix device errors
+        return # TODO fix device errors | TODO rethink explanation now that self.prep is moved to custom_net
         # determining the size in advance would be more efficient than stacking
         # [num_samples, gnn_output_size]
         xs = torch.empty((0, self.num_output_nodes), device=self.device)

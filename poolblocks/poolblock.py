@@ -1,4 +1,5 @@
 import abc
+from argparse import Namespace
 
 import torch
 
@@ -9,23 +10,31 @@ import torch.nn.functional as F
 from torch_geometric.nn import dense_diff_pool, DenseGCNConv
 
 class PoolBlock(torch.nn.Module, abc.ABC):
-    pass
+    def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
+                 activation_function=F.relu, forced_embeddings=None, **kwargs):
+        super().__init__()
+        self.forced_embeddings = forced_embeddings
+        self.activation_function = activation_function
+        self.embedding_sizes = embedding_sizes
+
+    @abc.abstractmethod
+    def forward(self, x: torch.Tensor, adj_or_edge_index, mask=None):
+        pass
+
 
 class DiffPoolBlock(PoolBlock):
-    def __init__(self, num_output_nodes: int, embedding_sizes: List[int], conv_type=DenseGCNConv,
-                 activation_function=F.relu, forced_embeddings=None):
+    def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
+                 activation_function=F.relu, forced_embeddings=None, **kwargs):
         """
 
         :param sizes: [input_size, hidden_size1, hidden_size2, ..., output_size]
         """
-        super().__init__()
+        super().__init__(embedding_sizes, conv_type, activation_function, forced_embeddings)
         # Sizes of layers for generating the pooling embedding could be chosen completely arbitrary.
         # Sharing the first layers and only using a different one for the last layer would be imaginable, too.
         pool_sizes = embedding_sizes.copy()
-        pool_sizes[-1] = num_output_nodes
+        pool_sizes[-1] = kwargs["num_output_nodes"]
 
-        self.forced_embeddings = forced_embeddings
-        self.activation_function = activation_function
         self.embedding_convs = torch.nn.ModuleList()
         self.pool_convs = torch.nn.ModuleList()
         for i in range(len(embedding_sizes) - 1):
@@ -34,7 +43,7 @@ class DiffPoolBlock(PoolBlock):
             self.pool_convs.append(conv_type(pool_sizes[i], pool_sizes[i+1]))
 
 
-    def forward(self, x, adj, mask=None):
+    def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None):
         """
         :param x:
         :param edge_index:
@@ -68,13 +77,26 @@ class DiffPoolBlock(PoolBlock):
         return new_embeddings, new_adj, loss_l + loss_e, pool, embedding
 
 class ASAPBlock(PoolBlock):
-    pass
+    """
+    After: https://github.com/pyg-team/pytorch_geometric/blob/master/benchmark/kernel/asap.py
+    """
+
+    def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
+                 activation_function=F.relu, forced_embeddings=None, **kwargs):
+        super().__init__(embedding_sizes, conv_type, activation_function, forced_embeddings)
+        # TODO if embedding_sizes unused, assert length 2 (only input and output)
 
 
-__all__ = [DiffPoolBlock]
+    def forward(self, x: torch.Tensor, adj_or_edge_index, mask=None):
+        pass
 
-def from_name(name: str):
-    for b in __all__:
+
+
+__all_dense__ = [DiffPoolBlock]
+__all_sparse__ = [DiffPoolBlock]
+
+def from_name(name: str, dense_data: bool):
+    for b in __all_dense__ if dense_data else __all_sparse__:
         if b.__name__ == name + "Block":
             return b
-    raise ValueError(f"Unknown pooling type {name}!")
+    raise ValueError(f"Unknown pooling type {name} for dense_data={dense_data}!")
