@@ -44,12 +44,11 @@ class DenseGraphPoolingNetwork(GraphPoolingNetwork):
         pooling_assignments = []
         pooling_activations = []
         for block in self.pool_blocks:
-            x, adj, temp_loss, pool, last_embedding = block(x, adj, mask)
-            mask = None
+            x, adj, temp_loss, pool, last_embedding, mask = block(x, adj, mask)
             pooling_loss += temp_loss
             pooling_assignments.append(pool)
             pooling_activations.append(last_embedding)
-        return x, pooling_loss, pooling_assignments, pooling_activations
+        return x, pooling_loss, pooling_assignments, pooling_activations, mask
 
 class SparseGraphPoolingNetwork(GraphPoolingNetwork):
     def __init__(self, num_node_features: int, layer_sizes: List[List[int]],
@@ -61,14 +60,13 @@ class SparseGraphPoolingNetwork(GraphPoolingNetwork):
 
 
     def forward(self, data: Data):
-        x, edge_index, mask = data.x, data.edge_index, data.mask
+        x, edge_index, batch = data.x, data.edge_index, data.batch
         pooling_loss = 0
         pooling_assignments = []
         pooling_activations = []
         for block in self.pool_blocks:
-            x, edge_index, temp_loss, pool, last_embedding = block(x, edge_index, mask)
-            mask = None
+            x, edge_index, temp_loss, pool, last_embedding, batch = block(x, edge_index, batch)
             pooling_loss += temp_loss
             pooling_assignments.append(pool)
             pooling_activations.append(last_embedding)
-        return x, pooling_loss, pooling_assignments, pooling_activations
+        return x, pooling_loss, pooling_assignments, pooling_activations, batch

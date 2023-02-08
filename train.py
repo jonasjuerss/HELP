@@ -34,7 +34,7 @@ SPARSE_CONV_TYPES = [GCNConv]
 device = None
 
 def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: DenseDataLoader, epoch: int,
-                     pooling_loss_weight: float):
+                     pooling_loss_weight: float, dense_data: bool):
     if train:
         model.train()
     else:
@@ -51,13 +51,22 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: DenseData
                 optimizer.zero_grad()
 
             out, _, pooling_loss, _, _ = model(data)
-            classification_loss = F.nll_loss(out, data.y.squeeze(1))
+            target = data.y
+            if dense_data:
+                # For some reason, DataLoader flattens y (e.g. for batch_size=64 and output size 2, it would create one
+                # vector of 128 entries). DenseDataLoader doesn't show this behaviour which is why we squeeze in our
+                # training loop. As long as we only do graph classification (as opposed to predicting multiple values
+                # per graph), we can fix this by just manually introducing the desired dimension with unsqueeze. In the
+                # future, we might just use reshape instead of unsqueeze to support multiple output values, but the
+                # question, why pytorch geometric behaves this way remains open.
+                target = target.squeeze(1)
+            classification_loss = F.nll_loss(out, target)
             loss = classification_loss + pooling_loss_weight * pooling_loss + model.custom_losses(batch_size)
 
             sum_loss += batch_size * float(loss)
             sum_classification_loss += batch_size * float(classification_loss)
             sum_pooling_loss += batch_size * float(pooling_loss)
-            correct += int((out.argmax(dim=1) == data.y.squeeze(1)).sum())
+            correct += int((out.argmax(dim=1) == target).sum())
 
             if train:
                 loss.backward()
@@ -167,7 +176,7 @@ if __name__ == "__main__":
     #                     help='The number of nodes after each pooling step for architectures like DiffPool which require'
     #                          ' to pre-specify that. Note that the last one should be 1 for classification')
 
-    parser.add_argument('--conv_type', type=str, default="DenseGCNConv",
+    parser.add_argument('--conv_type', type=str, default=["DenseGCNConv", "GCNConv"][1],
                         help='The type of graph convolution to use.')
     parser.add_argument('--output_layer', type=str, default="DenseClassifier",
                         help='The type of graph convolution to use.')
@@ -176,11 +185,15 @@ if __name__ == "__main__":
                              'classification layer. \"flatten\" only works if the number of clusters in the last graph '
                              'is constant/independent of the input graph size and \"none\" only if the chosen '
                              'classifier can deal with a set of inputs.')
-    parser.add_argument('--pooling_type', type=str, default="DiffPool",
+    parser.add_argument('--pooling_type', type=str, default=["DiffPool", "ASAP"][1],
                         help='The type of pooling to use.')
 
     parser.add_argument('--dataset', type=json.loads, default=current_dataset.__dict__(),
                         help="A json that defines the current dataset")
+    parser.add_argument('--min_nodes', type=int, default=0,
+                        help='Minimum number of nodes for a graph in the dataset. All other graphs are discarded. '
+                             'Required e.g. to guarantee that ASAPooling always outputs a fixed number of nodes when '
+                             'num_output_nodes is set.')
 
     parser.add_argument('--train_set_size', type=int, default=512,
                         help='Number of samples for the training set.')
@@ -215,7 +228,13 @@ if __name__ == "__main__":
     parser.set_defaults(use_wandb=True)
     parser.add_argument('--no_wandb', action='store_false', dest='use_wandb',
                         help='Turns off logging to wandb')
-    args = custom_logger.init(parser.parse_args())
+    args = parser.parse_args()
+    for block_args in args.pool_block_args:
+        if args.pooling_type in ["ASAP"] and block_args.get("num_output_nodes", -1) > args.min_nodes:
+            print(f"The pooling method {args.pooling_type} cannot increase the number of nodes. Increasing "
+                  f"min_nodes to {block_args['num_output_nodes']} to guarantee the given fixed number of output nodes.")
+            args.min_nodes = block_args["num_output_nodes"]
+    args = custom_logger.init(args)
 
     device = torch.device(args.device)
     torch.manual_seed(args.seed)
@@ -233,8 +252,10 @@ if __name__ == "__main__":
                       pooling_block_type=poolblocks.poolblock.from_name(args.pooling_type, args.dense_data),
                       conv_type=conv_type, activation_function=gnn_activation).to(device)
 
-    train_data = [dataset.sample(dense=args.dense_data) for _ in range(args.train_set_size)]
-    test_data = [dataset.sample(dense=args.dense_data) for _ in range(args.test_set_size)]
+    def condition(d):
+        return d.num_nodes >= args.min_nodes
+    train_data = [dataset.sample(dense=args.dense_data, condition=condition) for d in range(args.train_set_size)]
+    test_data = [dataset.sample(dense=args.dense_data, condition=condition) for d in range(args.test_set_size)]
     graphs_to_log = train_data[:args.graphs_to_log] + test_data[:args.graphs_to_log]
     if args.dense_data:
         train_loader = DenseDataLoader(train_data, batch_size=args.batch_size, shuffle=True)
@@ -248,15 +269,15 @@ if __name__ == "__main__":
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
 
     for epoch in tqdm(range(args.num_epochs)):
-        train_test_epoch(True, model, optimizer, train_loader, epoch, args.pooling_loss_weight)
-        if epoch % args.graph_log_freq == 0:
-            log_graphs(model, graphs_to_log, epoch)
+        train_test_epoch(True, model, optimizer, train_loader, epoch, args.pooling_loss_weight, args.dense_data)
+        # if epoch % args.graph_log_freq == 0:
+        #     log_graphs(model, graphs_to_log, epoch)
         if epoch % args.formula_log_freq == 0:
             log_formulas(model, train_loader, test_loader, dataset.class_names, epoch)
-        train_test_epoch(False, model, optimizer, test_loader, epoch, args.pooling_loss_weight)
+        train_test_epoch(False, model, optimizer, test_loader, epoch, args.pooling_loss_weight, args.dense_data)
 
-    if args.graph_log_freq >= 0:
-        log_graphs(model, graphs_to_log, epoch)
+    # if args.graph_log_freq >= 0:
+    #     log_graphs(model, graphs_to_log, epoch)
     if args.formula_log_freq >= 0:
         log_formulas(model, train_loader, test_loader, dataset.class_names, epoch)
 

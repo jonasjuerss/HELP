@@ -32,7 +32,7 @@ class Classifier(torch.nn.Module, abc.ABC):
     def forward(self, concepts: Tensor) -> Tensor:
         """
         :param concepts: <ul>
-            <li>either: [batch_size, num_output_nodes, features_per_output_node] (for output_layer_merge="none")</li>
+            <li>either: [batch_size, num_output_nodes, features_per_output_node] (for output_layer_merge="none")</li> TODO change
             <li>or: [batch_size, features_per_output_node] (for output_layer_merge="max", "sum")</li>
             <li>or: [batch_size, num_output_nodes * features_per_output_node] (for output_layer_merge="flatten")</li></ul>
             Where the last 2 cases can be handled transparently as long as the number of nodes in the last graph is

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import List, Tuple
+from typing import List, Tuple, Callable
 
 import torch
 from torch.distributions import Categorical
@@ -60,13 +60,18 @@ class CustomDataset(seri.ArgSerializable):
             data.pos = torch.cat([data.pos, data.pos.new_zeros(size)], dim=0)
 
         return data
-    def sample(self, dense=False) -> Data:
+    def sample(self, dense=False, condition: Callable[[Data], bool]=(lambda _: True)) -> Data:
         """
         Samples a data object for a single graph and class
         :param dense: Whether to transform to dense representation
         :return:
         """
-        return self._to_dense(self._sample()) if dense else self._sample()
+        for _ in range(100):
+            sample = self._sample()
+            if condition(sample):
+                return self._to_dense(sample) if dense else sample
+        raise TimeoutError("Could not find graph satisfying the given condition (e.g. minimum number of nodes) in 100 "
+                           "attempts!")
     @abstractmethod
     def _sample(self) -> Data:
         pass
@@ -108,12 +113,12 @@ class UniqueMotifCategorizationDataset(CustomDataset):
                 y += 1
             counts.append(num_motif)
         graph = self.template.sample(counts)
-        return Data(x=graph.x, edge_index=graph.edge_index, y=torch.tensor(y)[None], num_nodes=graph.num_nodes())
+        return Data(x=graph.x, edge_index=graph.edge_index, y=torch.tensor([y]), num_nodes=graph.num_nodes())
 
 class UniqueMultipleOccurrencesMotifCategorizationDataset(CustomDataset):
     """
     Same classes as UniqueMotifCategorizationDataset but motifs may als occur multiple times.
-    For categorization, it is still only relevant if a motif occured at least once
+    For categorization, it is still only relevant if a motif occurred at least once
     """
 
     def __init__(self, base_motif: Motif, possible_motifs: List[Motif], motif_probs: List[float]):
@@ -146,7 +151,7 @@ class UniqueMultipleOccurrencesMotifCategorizationDataset(CustomDataset):
             else:
                 counts.append(0)
         graph = self.template.sample(counts)
-        return Data(x=graph.x, edge_index=graph.edge_index, y=torch.tensor(y)[None], num_nodes=graph.num_nodes())
+        return Data(x=graph.x, edge_index=graph.edge_index, y=torch.tensor([y]), num_nodes=graph.num_nodes())
 
 
 class CustomDatasetGraphTemplate(seri.ArgSerializable):
