@@ -5,7 +5,7 @@ from torch_geometric.data import Data
 import torch
 from torch_geometric.nn import DenseGCNConv
 
-from poolblocks.poolblock import DiffPoolBlock, PoolBlock
+from poolblocks.poolblock import PoolBlock
 
 
 # Other example: https://github.com/pyg-team/pytorch_geometric/blob/master/examples/proteins_diff_pool.py

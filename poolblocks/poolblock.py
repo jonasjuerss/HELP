@@ -1,13 +1,20 @@
 import abc
+import typing
 from argparse import Namespace
 
+import numpy as np
 import torch
 
 from typing import List
 
 import torch
 import torch.nn.functional as F
+import wandb
+from torch_geometric.data import Data
 from torch_geometric.nn import dense_diff_pool, DenseGCNConv, ASAPooling
+
+from custom_logger import log
+from graphutils import adj_to_edge_index
 
 
 class PoolBlock(torch.nn.Module, abc.ABC):
@@ -34,6 +41,10 @@ class PoolBlock(torch.nn.Module, abc.ABC):
         batch_or_mask
         """
         pass
+
+    def log_assignments(self, model: 'CustomNet', graphs: typing.List[Data], epoch: int):
+        pass
+
 
 
 class DiffPoolBlock(PoolBlock):
@@ -98,6 +109,47 @@ class DiffPoolBlock(PoolBlock):
         mask = None
         return new_embeddings, new_adj, loss_l + loss_e, pool, embedding, mask
 
+    def log_assignments(self, model: 'CustomNet', graphs: typing.List[Data], epoch: int,
+                        cluster_colors=torch.tensor([[1., 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1], [0, 0, 0]])[None, :, :]):
+        node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "label", "activations"])
+        edge_table = wandb.Table(["graph", "pool_step", "source", "target"])
+        device = self.embedding_convs[0].bias.device
+        with torch.no_grad():
+            for graph_i, data in enumerate(graphs):
+                data = data.clone().detach().to(device)
+                num_nodes = data.num_nodes  # note that this will be changed to tensor in model call
+                out, concepts, _, pool_assignments, pool_activations = model(data)
+
+                for pool_step, assignment in enumerate(pool_assignments[:1]):
+                    # [num_nodes, num_clusters]
+                    assignment = torch.softmax(assignment, dim=-1)  # usually performed by diffpool function
+                    assignment = assignment.detach().cpu().squeeze(0)  # remove batch dimensions
+
+                    if cluster_colors.shape[1] < assignment.shape[1]:
+                        raise ValueError(
+                            f"Only {cluster_colors.shape[1]} colors given to distinguish {assignment.shape[1]} cluster")
+
+                    # [num_nodes, 3] (intermediate dimensions: num_nodes x num_clusters x 3)
+                    colors = torch.sum(assignment[:, :, None] * cluster_colors[:, :assignment.shape[1], :], dim=1)[
+                             :data.num_nodes, :]
+                    colors = torch.round(colors * 255).to(int)
+                    for i in range(num_nodes):
+                        node_table.add_data(graph_i, pool_step, i, colors[i, 0].item(),
+                                            colors[i, 1].item(), colors[i, 2].item(),
+                                            ", ".join([f"{m.item() * 100:.0f}%" for m in assignment[i].cpu()]),
+                                            ", ".join([f"{m.item():.2f}" for m in
+                                                       pool_activations[pool_step][0, i, :].cpu()]))
+
+                    # [3, num_edges] where the first row seems to be constant 0, indicating the graph membership
+                    edge_index = adj_to_edge_index(data.adj)
+                    for i in range(edge_index.shape[1]):
+                        edge_table.add_data(graph_i, pool_step, edge_index[1, i].item(), edge_index[2, i].item())
+        log(dict(
+            # graphs_table=graphs_table
+            node_table=node_table,
+            edge_table=edge_table
+        ), step=epoch)
+
 class ASAPBlock(PoolBlock):
     """
     After: https://github.com/pyg-team/pytorch_geometric/blob/master/benchmark/kernel/asap.py
@@ -131,8 +183,42 @@ class ASAPBlock(PoolBlock):
                 x = self.activation_function(conv(x, edge_index))
         else:
             x = torch.ones(x.shape[:-1] + (self.num_output_features,), device=x.device) * self.forced_embeddings
-        x, edge_index, edge_weight, batch, perm = self.asap(x=x, edge_index=edge_index, batch=batch)
-        return x, edge_index, 0, None, None, batch
+        new_x, edge_index, edge_weight, batch, perm = self.asap(x=x, edge_index=edge_index, batch=batch)
+        return new_x, edge_index, 0, perm, x, batch
+
+    def log_assignments(self, model: 'CustomNet', graphs: typing.List[Data], epoch: int):
+        node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "label", "activations"])
+        edge_table = wandb.Table(["graph", "pool_step", "source", "target"])
+        device = self.embedding_convs[0].bias.device
+        with torch.no_grad():
+            for graph_i, data in enumerate(graphs):
+                data = data.clone().detach().to(device)
+                num_nodes = data.num_nodes  # note that this will be changed to tensor in model call
+                out, concepts, _, pool_perms, pool_activations = model(data)
+
+                for pool_step, perm in enumerate(pool_perms[:1]):
+                    # [num_nodes]
+                    perm = perm.detach().cpu()
+
+                    # [num_nodes, 3] (intermediate dimensions: num_nodes x num_clusters x 3)
+                    colors = np.ones((num_nodes, 3), dtype=np.int) * 255
+                    colors[perm, :] = 0
+                    for i in range(num_nodes):
+                        node_table.add_data(graph_i, pool_step, i, colors[i, 0].item(),
+                                            colors[i, 1].item(), colors[i, 2].item(),
+                                            "",
+                                            ", ".join([f"{m.item():.2f}" for m in
+                                                       pool_activations[pool_step][i, :].cpu()]))
+
+                    # [3, num_edges] where the first row seems to be constant 0, indicating the graph membership
+                    edge_index = data.edge_index
+                    for i in range(edge_index.shape[1]):
+                        edge_table.add_data(graph_i, pool_step, edge_index[0, i].item(), edge_index[1, i].item())
+        log(dict(
+            # graphs_table=graphs_table
+            node_table=node_table,
+            edge_table=edge_table
+        ), step=epoch)
 
 
 

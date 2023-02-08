@@ -1,33 +1,22 @@
 import argparse
-import io
 import json
 import typing
 from contextlib import nullcontext
 
-import networkx as nx
 import torch
-import torch_geometric
-from PIL import Image
-from matplotlib import pyplot as plt
-from torch_geometric.data import Data
-
-import wandb
-from torch_geometric import transforms
+import torch.nn.functional as F
 from torch_geometric.loader import DataLoader, DenseDataLoader
 from torch_geometric.nn import DenseGCNConv, GCNConv
 from tqdm import tqdm
 
 import custom_logger
-import poolblocks.poolblock
-from data_generation.custom_dataset import UniqueMotifCategorizationDataset, CustomDataset
-from custom_net import CustomNet
-from custom_logger import log
 import output_layers
-import torch.nn.functional as F
-
+import poolblocks.poolblock
+from custom_logger import log
+from custom_net import CustomNet
+from data_generation.custom_dataset import UniqueMotifCategorizationDataset, CustomDataset
 from data_generation.deserializer import from_dict
 from data_generation.motifs import BinaryTreeMotif, HouseMotif, FullyConnectedMotif
-from graphutils import adj_to_edge_index
 
 DENSE_CONV_TYPES = [DenseGCNConv]
 SPARSE_CONV_TYPES = [GCNConv]
@@ -80,62 +69,6 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: DenseData
          f"{mode}_accuracy": correct / dataset_len},
         step=epoch)
 
-def log_graphs(model: CustomNet, graphs: typing.List[Data], epoch: int,
-               cluster_colors=torch.tensor([[1., 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1], [0, 0, 0]])[None, :, :]):
-    # TODO log to tables in wandb instead of just figures. Add hover labels to see exact cluster assignment
-    node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "label", "activations"])
-    edge_table = wandb.Table(["graph", "pool_step", "source", "target"])
-
-    # graphs_table = wandb.Table(columns=["graph", "pool_step", "class", "train_sample", "image"])
-    with torch.no_grad():
-        for graph_i, data in enumerate(graphs):
-            data = data.clone().detach().to(device)
-            num_nodes = data.num_nodes # note that this will be changed to tensor in model call
-            out, concepts, _, pool_assignments, pool_activations = model(data)
-            # print(str(graph_i) * 20)
-            # print(pool_assignments)
-            # print(concepts)
-            # print(out)
-            # TODO try out what happens when replacing e.g. house by pentagon motif as number of nodes is the same
-            for pool_step, assignment in enumerate(pool_assignments[:1]):
-                assignment = torch.softmax(assignment, dim=-1)  # usually performed by diffpool function
-                assignment = assignment.detach().cpu().squeeze(0)  # remove batch dimensions
-
-                if cluster_colors.shape[1] < assignment.shape[1]:
-                    raise ValueError(
-                        f"Only {cluster_colors.shape[1]} colors given to distinguish {assignment.shape[1]} cluster")
-
-                # [num_nodes, 3] (intermediate dimensions: num_nodes x num_clusters x 3)
-                colors = torch.sum(assignment[:, :, None] * cluster_colors[:, :assignment.shape[1], :], dim=1)[:data.num_nodes, :]
-                colors = torch.round(colors * 255).to(int)
-                for i in range(num_nodes):
-                    node_table.add_data(graph_i, pool_step, i, colors[i, 0].item(),
-                                        colors[i, 1].item(), colors[i, 2].item(),
-                                        ", ".join([f"{m.item()*100:.0f}%" for m in assignment[i].cpu()]),
-                                        ", ".join([f"{m.item():.2f}" for m in pool_activations[pool_step][0, i, :].cpu()]))
-
-
-                # [3, num_edges] where the first row seems to be constant 0, indicating the graph membership
-                edge_index = adj_to_edge_index(data.adj)
-                for i in range(edge_index.shape[1]):
-                    edge_table.add_data(graph_i, pool_step, edge_index[1, i].item(), edge_index[2, i].item())
-
-                # Legacy:
-                # data.edge_index = adj_to_edge_index(data.adj)
-                # im_io = io.BytesIO()
-                # fig, ax = plt.subplots()
-                # g = torch_geometric.utils.to_networkx(data, to_undirected=True)
-                # nx.draw(g, node_color=colors, with_labels=True, ax=ax)#, pos=nx.spring_layout(g, seed=1))
-                # fig.savefig(im_io, format='png')
-                # plt.close(fig)
-                # im = Image.open(im_io)
-                # graphs_table.add_data(graph_i, pool_step, data.y.item(), graph_i < len(graphs) / 2, wandb.Image(im))
-
-    log(dict(
-        # graphs_table=graphs_table
-        node_table=node_table,
-        edge_table=edge_table
-    ), step=epoch)
 
 def log_formulas(model: CustomNet, train_loader: DataLoader, test_loader: DataLoader, class_names: typing.List[str],
                 epoch: int):
@@ -147,7 +80,8 @@ num_colors = 2
 current_dataset = UniqueMotifCategorizationDataset(BinaryTreeMotif(5, [0], num_colors),
                                                    [HouseMotif([1], [1], num_colors),
                                                     FullyConnectedMotif(5, [1], num_colors)],
-                                                   [[0.25, 0.25, 0.25, 0.25], [0.25, 0.25, 0.25, 0.25]])
+                                                    [[0.4, 0.6], [0.4, 0.6]])
+                                                   # [[0.25, 0.25, 0.25, 0.25], [0.25, 0.25, 0.25, 0.25]])
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -159,7 +93,7 @@ if __name__ == "__main__":
                         help='The weight of the entropy loss in the explanation layer.')
     parser.add_argument('--wd', type=float, default=5e-4,
                         help='The Adam weight decay to use.')
-    parser.add_argument('--num_epochs', type=int, default=300,
+    parser.add_argument('--num_epochs', type=int, default=10000,
                         help='The number of epochs to train for.')
     parser.add_argument('--batch_size', type=int, default=64,
                         help='The batch size to use.')
@@ -169,7 +103,7 @@ if __name__ == "__main__":
                              'network with 2 pooling steps where 5 message passes are performed before the first and ')
     parser.add_argument('--add_pool_block', type=json.loads, nargs='+', action='append',
                         # default=[{"num_output_layers": [4]}],
-                        default=[{"num_output_nodes": 4}],
+                        default=[{"num_output_nodes": 8}],
                         dest='pool_block_args',
                         help="Additional arguments for each pool block")
     # parser.add_argument('--nodes_per_layer', type=int, default=[4],
@@ -215,10 +149,13 @@ if __name__ == "__main__":
     parser.add_argument('--gnn_activation', type=str, default="leaky_relu",
                         help='Activation function to be used in between the GNN layers')
 
-    parser.set_defaults(dense_data=True)
+    parser.set_defaults(dense_data=False)
     parser.add_argument('--sparse_data', action='store_false', dest='dense_data',
                         help='Switches from a dense representation of graphs (dummy nodes are added so that each of '
                              'them has the same number of nodes) to a sparse one.')
+    parser.add_argument('--dense_data', action='store_true', dest='dense_data',
+                        help='Switches from a sparse data representation of graphs to a dense one (dummy nodes are '
+                             'added so that each of them has the same number of nodes).')
 
     parser.add_argument('--seed', type=int, default=1,
                         help='The seed used for pytorch. This also determines the dataset if generated randomly.')
@@ -270,8 +207,8 @@ if __name__ == "__main__":
 
     for epoch in tqdm(range(args.num_epochs)):
         train_test_epoch(True, model, optimizer, train_loader, epoch, args.pooling_loss_weight, args.dense_data)
-        # if epoch % args.graph_log_freq == 0:
-        #     log_graphs(model, graphs_to_log, epoch)
+        if epoch % args.graph_log_freq == 0:
+            model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, epoch)
         if epoch % args.formula_log_freq == 0:
             log_formulas(model, train_loader, test_loader, dataset.class_names, epoch)
         train_test_epoch(False, model, optimizer, test_loader, epoch, args.pooling_loss_weight, args.dense_data)
