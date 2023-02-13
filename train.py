@@ -3,6 +3,7 @@ import json
 import typing
 from contextlib import nullcontext
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch_geometric.loader import DataLoader, DenseDataLoader
@@ -32,6 +33,8 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: DenseData
     sum_loss = 0
     sum_classification_loss = 0
     sum_pooling_loss = 0
+    num_classes = model.output_layer.num_classes
+    class_counts = torch.zeros(num_classes)
     with nullcontext() if train else torch.no_grad():
         for data in loader:
             data = data.to(device)
@@ -55,7 +58,9 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: DenseData
             sum_loss += batch_size * float(loss)
             sum_classification_loss += batch_size * float(classification_loss)
             sum_pooling_loss += batch_size * float(pooling_loss)
-            correct += int((out.argmax(dim=1) == target).sum())
+            pred_classes = out.argmax(dim=1)
+            correct += int((pred_classes == target).sum())
+            class_counts += torch.bincount(pred_classes.detach(), minlength=num_classes).cpu()
 
             if train:
                 loss.backward()
@@ -63,10 +68,14 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: DenseData
     dataset_len = len(loader.dataset)
     mode = "train" if train else "test"
     model.log_custom_losses(mode, epoch, dataset_len)
+    distr_dict = {}
+    class_counts /= dataset_len
+    if not train:
+        distr_dict = {f"{mode}_percentage_class_{i}": class_counts[i] for i in range(num_classes)}
     log({f"{mode}_loss": sum_loss / dataset_len,
          f"{mode}_pooling_loss": sum_pooling_loss / dataset_len,
          f"{mode}_classification_loss": sum_classification_loss / dataset_len,
-         f"{mode}_accuracy": correct / dataset_len},
+         f"{mode}_accuracy": correct / dataset_len, **distr_dict},
         step=epoch)
 
 
@@ -98,7 +107,7 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=64,
                         help='The batch size to use.')
     parser.add_argument('--add_layer', type=int, nargs='+', action='append',
-                        default=[[16, 16, 16, 16, 16, 4]], dest='layer_sizes',
+                        default=[[16, 16, 16, 16, 16, 1]], dest='layer_sizes',
                         help='The layer sizes to use. Example: --add_layer 16 32 --add_layer 32 64 16 results in a '
                              'network with 2 pooling steps where 5 message passes are performed before the first and ')
     parser.add_argument('--add_pool_block', type=json.loads, nargs='+', action='append',

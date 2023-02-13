@@ -11,14 +11,16 @@ from torch_geometric.nn.aggr import MeanAggregation, SumAggregation
 
 from function_module import FunctionModule, MaskedFlatten, MaskedMean, MaskedSum
 from graph_pooling_network import GraphPoolingNetwork, DenseGraphPoolingNetwork, SparseGraphPoolingNetwork
+from output_layers import Classifier
 from poolblocks.poolblock import PoolBlock
 
 
 
 # Other example: https://github.com/pyg-team/pytorch_geometric/blob/master/examples/proteins_diff_pool.py
 class CustomNet(torch.nn.Module, abc.ABC):
-    def __init__(self, num_node_features: int, num_classes: int, args: Namespace, device, output_layer_type,
-                 pooling_block_type: Type[PoolBlock], conv_type: Type[torch.nn.Module], activation_function):
+    def __init__(self, num_node_features: int, num_classes: int, args: Namespace, device,
+                 output_layer_type: Type[Classifier], pooling_block_type: Type[PoolBlock],
+                 conv_type: Type[torch.nn.Module], activation_function):
         super().__init__()
         layer_sizes = args.layer_sizes
         pool_block_args: List[dict] = args.pool_block_args
