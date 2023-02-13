@@ -44,7 +44,7 @@ class DenseGraphPoolingNetwork(GraphPoolingNetwork):
         pooling_assignments = []
         pooling_activations = []
         for block in self.pool_blocks:
-            x, adj, temp_loss, pool, last_embedding, mask = block(x, adj, mask)
+            x, adj, _, temp_loss, pool, last_embedding, mask = block(x, adj, mask)
             pooling_loss += temp_loss
             pooling_assignments.append(pool)
             pooling_activations.append(last_embedding)
@@ -64,8 +64,10 @@ class SparseGraphPoolingNetwork(GraphPoolingNetwork):
         pooling_loss = 0
         pooling_assignments = []
         pooling_activations = []
+        edge_weights = None
         for block in self.pool_blocks:
-            x, edge_index, temp_loss, pool, last_embedding, batch = block(x, edge_index, batch)
+            x, edge_index, edge_weights, temp_loss, pool, last_embedding, batch = block(x, edge_index, batch,
+                                                                                        edge_weights=edge_weights)
             pooling_loss += temp_loss
             pooling_assignments.append(pool)
             pooling_activations.append(last_embedding)

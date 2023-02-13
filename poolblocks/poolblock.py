@@ -11,10 +11,11 @@ import torch
 import torch.nn.functional as F
 import wandb
 from torch_geometric.data import Data
-from torch_geometric.nn import dense_diff_pool, DenseGCNConv, ASAPooling
+from torch_geometric.nn import dense_diff_pool, DenseGCNConv
 
 from custom_logger import log
 from graphutils import adj_to_edge_index
+from poolblocks.custom_asap import ASAPooling
 
 
 class PoolBlock(torch.nn.Module, abc.ABC):
@@ -26,7 +27,8 @@ class PoolBlock(torch.nn.Module, abc.ABC):
         self.embedding_sizes = embedding_sizes
 
     @abc.abstractmethod
-    def forward(self, x: torch.Tensor, adj_or_edge_index: torch.Tensor, mask_or_batch=None):
+    def forward(self, x: torch.Tensor, adj_or_edge_index: torch.Tensor, mask_or_batch=None,
+                edge_weights=None):
         """
         Either takes x, adj and mask (for dense data) or x, edge_index and batch (for sparse data)
         :param x: [batch, num_nodes, num_features]
@@ -35,6 +37,7 @@ class PoolBlock(torch.nn.Module, abc.ABC):
         :return:
         new_embeddings [batch, num_nodes_new, num_features_new] or [num_nodes_new_total, num_features_new]
         new_adj_or_edge_index
+        new_edge_weights (for sparse pooling methods were necessary)
         pool_loss
         pool: assignment
         old_embeddings: Embeddings that went into the pooling operation
@@ -68,7 +71,7 @@ class DiffPoolBlock(PoolBlock):
             self.pool_convs.append(conv_type(pool_sizes[i], pool_sizes[i+1]))
 
 
-    def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None):
+    def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None):
         """
         :param x:
         :param edge_index:
@@ -107,7 +110,7 @@ class DiffPoolBlock(PoolBlock):
         # DiffPool will result in the same number of output nodes for all graphs, so we don't need to mask any nodes in
         # subsequent layers
         mask = None
-        return new_embeddings, new_adj, loss_l + loss_e, pool, embedding, mask
+        return new_embeddings, new_adj, None, loss_l + loss_e, pool, embedding, mask
 
     def log_assignments(self, model: 'CustomNet', graphs: typing.List[Data], epoch: int,
                         cluster_colors=torch.tensor([[1., 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1], [0, 0, 0]])[None, :, :]):
@@ -176,15 +179,16 @@ class ASAPBlock(PoolBlock):
         self.asap = ASAPooling(self.num_output_features, k)
 
 
-    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, batch=None):
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, batch=None, edge_weights=None):
 
         if self.forced_embeddings is None:
             for conv in self.embedding_convs:
-                x = self.activation_function(conv(x, edge_index))
+                x = self.activation_function(conv(x, edge_index, edge_weight=edge_weights))
         else:
             x = torch.ones(x.shape[:-1] + (self.num_output_features,), device=x.device) * self.forced_embeddings
-        new_x, edge_index, edge_weight, batch, perm = self.asap(x=x, edge_index=edge_index, batch=batch)
-        return new_x, edge_index, 0, perm, x, batch
+        new_x, edge_index, new_edge_weight, batch, perm = self.asap(x=x, edge_index=edge_index, batch=batch,
+                                                                    edge_weight=edge_weights)
+        return new_x, edge_index, new_edge_weight, 0, perm, x, batch
 
     def log_assignments(self, model: 'CustomNet', graphs: typing.List[Data], epoch: int):
         node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "label", "activations"])
