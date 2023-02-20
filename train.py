@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch_geometric.loader import DataLoader, DenseDataLoader
 from torch_geometric.nn import DenseGCNConv, GCNConv
 from tqdm import tqdm
+from typing import Union
 
 import custom_logger
 import output_layers
@@ -23,7 +24,7 @@ DENSE_CONV_TYPES = [DenseGCNConv]
 SPARSE_CONV_TYPES = [GCNConv]
 device = None
 
-def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: DenseDataLoader, epoch: int,
+def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[DataLoader, DenseDataLoader], epoch: int,
                      pooling_loss_weight: float, dense_data: bool):
     if train:
         model.train()
@@ -112,7 +113,7 @@ if __name__ == "__main__":
                              'network with 2 pooling steps where 5 message passes are performed before the first and ')
     parser.add_argument('--add_pool_block', type=json.loads, nargs='+', action='append',
                         # default=[{"num_output_layers": [4]}],
-                        default=[{"num_output_nodes": 8}],
+                        default=[{"num_output_nodes": 4}],
                         dest='pool_block_args',
                         help="Additional arguments for each pool block")
     # parser.add_argument('--nodes_per_layer', type=int, default=[4],
@@ -222,8 +223,8 @@ if __name__ == "__main__":
             log_formulas(model, train_loader, test_loader, dataset.class_names, epoch)
         train_test_epoch(False, model, optimizer, test_loader, epoch, args.pooling_loss_weight, args.dense_data)
 
-    # if args.graph_log_freq >= 0:
-    #     log_graphs(model, graphs_to_log, epoch)
+    if args.graph_log_freq >= 0:
+        model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, epoch)
     if args.formula_log_freq >= 0:
         log_formulas(model, train_loader, test_loader, dataset.class_names, epoch)
 

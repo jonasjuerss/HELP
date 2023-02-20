@@ -98,7 +98,7 @@ class ASAPooling(torch.nn.Module):
         edge_index: Tensor,
         edge_weight: Optional[Tensor] = None,
         batch: Optional[Tensor] = None,
-    ) -> Tuple[Tensor, Tensor, Optional[Tensor], Tensor, Tensor]:
+    ) -> Tuple[Tensor, Tensor, Optional[Tensor], Tensor, Tensor, Tensor, Tensor]:
         """"""
         N = x.size(0)
 
@@ -165,7 +165,7 @@ class ASAPooling(torch.nn.Module):
         row, col, edge_weight = A.coo()
         edge_index = torch.stack([row, col], dim=0)
 
-        return x, edge_index, edge_weight, batch, perm
+        return x, edge_index, edge_weight, batch, perm, fitness, score
 
     @torch.jit.unused
     def jittable(self) -> 'ASAPooling':

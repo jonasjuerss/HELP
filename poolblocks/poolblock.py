@@ -16,6 +16,8 @@ from torch_geometric.nn import dense_diff_pool, DenseGCNConv
 from custom_logger import log
 from graphutils import adj_to_edge_index
 from poolblocks.custom_asap import ASAPooling
+from torch_geometric.utils import add_remaining_self_loops
+from torch_scatter import scatter
 
 
 class PoolBlock(torch.nn.Module, abc.ABC):
@@ -70,6 +72,8 @@ class DiffPoolBlock(PoolBlock):
             self.embedding_convs.append(conv_type(embedding_sizes[i], embedding_sizes[i+1]))
             self.pool_convs.append(conv_type(pool_sizes[i], pool_sizes[i+1]))
 
+        self.cluster_colors = torch.tensor([[1., 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1], [0, 0, 0]])[None, :, :]
+
 
     def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None):
         """
@@ -112,8 +116,7 @@ class DiffPoolBlock(PoolBlock):
         mask = None
         return new_embeddings, new_adj, None, loss_l + loss_e, pool, embedding, mask
 
-    def log_assignments(self, model: 'CustomNet', graphs: typing.List[Data], epoch: int,
-                        cluster_colors=torch.tensor([[1., 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1], [0, 0, 0]])[None, :, :]):
+    def log_assignments(self, model: 'CustomNet', graphs: typing.List[Data], epoch: int):
         node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "label", "activations"])
         edge_table = wandb.Table(["graph", "pool_step", "source", "target"])
         device = self.embedding_convs[0].bias.device
@@ -128,12 +131,12 @@ class DiffPoolBlock(PoolBlock):
                     assignment = torch.softmax(assignment, dim=-1)  # usually performed by diffpool function
                     assignment = assignment.detach().cpu().squeeze(0)  # remove batch dimensions
 
-                    if cluster_colors.shape[1] < assignment.shape[1]:
+                    if self.cluster_colors.shape[1] < assignment.shape[1]:
                         raise ValueError(
-                            f"Only {cluster_colors.shape[1]} colors given to distinguish {assignment.shape[1]} cluster")
+                            f"Only {self.cluster_colors.shape[1]} colors given to distinguish {assignment.shape[1]} cluster")
 
                     # [num_nodes, 3] (intermediate dimensions: num_nodes x num_clusters x 3)
-                    colors = torch.sum(assignment[:, :, None] * cluster_colors[:, :assignment.shape[1], :], dim=1)[
+                    colors = torch.sum(assignment[:, :, None] * self.cluster_colors[:, :assignment.shape[1], :], dim=1)[
                              :data.num_nodes, :]
                     colors = torch.round(colors * 255).to(int)
                     for i in range(num_nodes):
@@ -177,6 +180,17 @@ class ASAPBlock(PoolBlock):
         self.num_output_features = embedding_sizes[-1]
 
         self.asap = ASAPooling(self.num_output_features, k)
+        self.cluster_colors = torch.tensor([
+            [22, 160, 133],
+            [243, 156, 18],
+            [142, 68, 173],
+            [39, 174, 96],
+            [192, 57, 43],
+            [44, 62, 80],
+            [41, 128, 185],
+            [39, 174, 96],
+            [211, 84, 0]])
+
 
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor, batch=None, edge_weights=None):
@@ -186,38 +200,52 @@ class ASAPBlock(PoolBlock):
                 x = self.activation_function(conv(x, edge_index, edge_weight=edge_weights))
         else:
             x = torch.ones(x.shape[:-1] + (self.num_output_features,), device=x.device) * self.forced_embeddings
-        new_x, edge_index, new_edge_weight, batch, perm = self.asap(x=x, edge_index=edge_index, batch=batch,
-                                                                    edge_weight=edge_weights)
-        return new_x, edge_index, new_edge_weight, 0, perm, x, batch
+        new_x, edge_index, new_edge_weight, batch, perm, fitness, score = self.asap(x=x, edge_index=edge_index,
+                                                                                    batch=batch,
+                                                                                    edge_weight=edge_weights)
+        return new_x, edge_index, new_edge_weight, 0, (perm, fitness, score), x, batch
 
     def log_assignments(self, model: 'CustomNet', graphs: typing.List[Data], epoch: int):
-        node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "label", "activations"])
-        edge_table = wandb.Table(["graph", "pool_step", "source", "target"])
+        node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "border_strength", "border_color",
+                                  "label", "activations"])
+        edge_table = wandb.Table(["graph", "pool_step", "source", "target", "strength"]) # , "label", "strength"
         device = self.embedding_convs[0].bias.device
         with torch.no_grad():
             for graph_i, data in enumerate(graphs):
+                edge_index = data.edge_index.detach().clone()
+                edge_index, _ = add_remaining_self_loops(edge_index, fill_value=1., num_nodes=data.num_nodes)
+
                 data = data.clone().detach().to(device)
                 num_nodes = data.num_nodes  # note that this will be changed to tensor in model call
-                out, concepts, _, pool_perms, pool_activations = model(data)
+                out, concepts, _, assigment_info, pool_activations = model(data)
 
-                for pool_step, perm in enumerate(pool_perms[:1]):
+                for pool_step, (perm, fitness, score) in enumerate(assigment_info[:1]):
                     # [num_nodes]
                     perm = perm.detach().cpu()
+                    fitness = fitness.detach().cpu()
+                    score = score.detach().cpu()
 
                     # [num_nodes, 3] (intermediate dimensions: num_nodes x num_clusters x 3)
-                    colors = np.ones((num_nodes, 3), dtype=np.int) * 255
-                    colors[perm, :] = 0
+                    colors = torch.zeros((num_nodes, 3), dtype=int)
+                    colors[perm, :] = self.cluster_colors[:perm.shape[0]]
+
+                    # perform inverse thing from ASAP (color the nodes that effected the outcome)
+                    # Crucially, colors is 0 for all nodes that are not in perm, so their values are not gonna effect the result
+                    color_to_edge = colors[edge_index[1]] * score.view(-1, 1)
+                    colors = scatter(color_to_edge, edge_index[0], dim=0, reduce='add')
                     for i in range(num_nodes):
                         node_table.add_data(graph_i, pool_step, i, colors[i, 0].item(),
                                             colors[i, 1].item(), colors[i, 2].item(),
-                                            "",
+                                            2 * fitness[i].item(),
+                                            "#F00" if i in perm else "#000",
+                                            f"fitness: {fitness[i].item(): .3f}",
                                             ", ".join([f"{m.item():.2f}" for m in
                                                        pool_activations[pool_step][i, :].cpu()]))
 
                     # [3, num_edges] where the first row seems to be constant 0, indicating the graph membership
-                    edge_index = data.edge_index
                     for i in range(edge_index.shape[1]):
-                        edge_table.add_data(graph_i, pool_step, edge_index[0, i].item(), edge_index[1, i].item())
+                        edge_table.add_data(graph_i, pool_step, edge_index[0, i].item(), edge_index[1, i].item(),
+                                            2*score[i].item())
         log(dict(
             # graphs_table=graphs_table
             node_table=node_table,
