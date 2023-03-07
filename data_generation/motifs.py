@@ -136,7 +136,8 @@ class FullyConnectedMotif(Motif):
         adj = torch.ones((self.num_nodes, self.num_nodes), dtype=torch.long)
         node_indices = torch.arange(self.num_nodes)
         adj[node_indices, node_indices] = 0
-        return SparseGraph(x, adj_to_edge_index(adj))
+        edge_index, _, _ = adj_to_edge_index(adj)
+        return SparseGraph(x, edge_index)
 
 
 class BinaryTreeMotif(Motif):

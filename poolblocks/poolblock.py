@@ -1,10 +1,6 @@
 import abc
 import typing
-from argparse import Namespace
-
-import numpy as np
-import torch
-
+from functools import partial
 from typing import List
 
 import torch
@@ -12,12 +8,15 @@ import torch.nn.functional as F
 import wandb
 from torch_geometric.data import Data
 from torch_geometric.nn import dense_diff_pool, DenseGCNConv
+from torch_geometric.utils import add_remaining_self_loops
+from torch_scatter import scatter
 
+import custom_logger
+import graphutils
+import perturbations
 from custom_logger import log
 from graphutils import adj_to_edge_index
 from poolblocks.custom_asap import ASAPooling
-from torch_geometric.utils import add_remaining_self_loops
-from torch_scatter import scatter
 
 
 class PoolBlock(torch.nn.Module, abc.ABC):
@@ -51,7 +50,6 @@ class PoolBlock(torch.nn.Module, abc.ABC):
         pass
 
 
-
 class DiffPoolBlock(PoolBlock):
     def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
                  activation_function=F.relu, forced_embeddings=None, **kwargs):
@@ -69,11 +67,10 @@ class DiffPoolBlock(PoolBlock):
         self.pool_convs = torch.nn.ModuleList()
         for i in range(len(embedding_sizes) - 1):
             # Using DenseGCNConv so I can use adjacency matrix instead of edge_index and don't have to convert back and forth for DiffPool https://github.com/pyg-team/pytorch_geometric/issues/881
-            self.embedding_convs.append(conv_type(embedding_sizes[i], embedding_sizes[i+1]))
-            self.pool_convs.append(conv_type(pool_sizes[i], pool_sizes[i+1]))
+            self.embedding_convs.append(conv_type(embedding_sizes[i], embedding_sizes[i + 1]))
+            self.pool_convs.append(conv_type(pool_sizes[i], pool_sizes[i + 1]))
 
         self.cluster_colors = torch.tensor([[1., 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1], [0, 0, 0]])[None, :, :]
-
 
     def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None):
         """
@@ -109,7 +106,7 @@ class DiffPoolBlock(PoolBlock):
         pool = self.pool_convs[-1](pool, adj)
 
         # TODO try dividing the softmax by its maximum value similar to the concepts
-        #print(embedding.shape, edge_index.shape, pool.shape) [batch_nodes, num_features] [2, ?] []
+        # print(embedding.shape, edge_index.shape, pool.shape) [batch_nodes, num_features] [2, ?] []
         new_embeddings, new_adj, loss_l, loss_e = dense_diff_pool(embedding, adj, pool)
         # DiffPool will result in the same number of output nodes for all graphs, so we don't need to mask any nodes in
         # subsequent layers
@@ -147,7 +144,7 @@ class DiffPoolBlock(PoolBlock):
                                                        pool_activations[pool_step][0, i, :].cpu()]))
 
                     # [3, num_edges] where the first row seems to be constant 0, indicating the graph membership
-                    edge_index = adj_to_edge_index(data.adj)
+                    edge_index, _, _ = adj_to_edge_index(data.adj, data.mask if hasattr(data, "mask") else None)
                     for i in range(edge_index.shape[1]):
                         edge_table.add_data(graph_i, pool_step, edge_index[1, i].item(), edge_index[2, i].item())
         log(dict(
@@ -156,22 +153,24 @@ class DiffPoolBlock(PoolBlock):
             edge_table=edge_table
         ), step=epoch)
 
+
 class ASAPBlock(PoolBlock):
     """
     After: https://github.com/pyg-team/pytorch_geometric/blob/master/benchmark/kernel/asap.py
     """
 
     def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
-                 activation_function=F.relu, forced_embeddings=None, **kwargs):
+                 activation_function=F.relu, forced_embeddings=None, num_output_nodes: int = None,
+                 ratio_output_nodes: float = None, **kwargs):
         super().__init__(embedding_sizes, conv_type, activation_function, forced_embeddings)
-        if "num_output_nodes" in kwargs:
-            if "ratio_output_nodes" in kwargs:
+        if num_output_nodes is not None:
+            if ratio_output_nodes is not None:
                 raise ValueError("Only a fixed number of output nodes (num_output_nodes) or a percentage of input nodes"
                                  "(ratio_output_nodes) can be defined for ASAPPooling but not both.")
-            k = kwargs["num_output_nodes"]
-            assert(isinstance(k, int))
+            k = num_output_nodes
+            assert (isinstance(num_output_nodes, int))
         else:
-            k = kwargs["ratio_output_nodes"]
+            k = ratio_output_nodes
             assert (isinstance(k, float))
 
         self.embedding_convs = torch.nn.ModuleList()
@@ -189,9 +188,8 @@ class ASAPBlock(PoolBlock):
             [44, 62, 80],
             [41, 128, 185],
             [39, 174, 96],
-            [211, 84, 0]])
-
-
+            [211, 84, 0],
+            [121, 85, 72]], dtype=torch.float)
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor, batch=None, edge_weights=None):
 
@@ -208,7 +206,7 @@ class ASAPBlock(PoolBlock):
     def log_assignments(self, model: 'CustomNet', graphs: typing.List[Data], epoch: int):
         node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "border_strength", "border_color",
                                   "label", "activations"])
-        edge_table = wandb.Table(["graph", "pool_step", "source", "target", "strength"]) # , "label", "strength"
+        edge_table = wandb.Table(["graph", "pool_step", "source", "target", "strength"])  # , "label", "strength"
         device = self.embedding_convs[0].bias.device
         with torch.no_grad():
             for graph_i, data in enumerate(graphs):
@@ -226,13 +224,15 @@ class ASAPBlock(PoolBlock):
                     score = score.detach().cpu()
 
                     # [num_nodes, 3] (intermediate dimensions: num_nodes x num_clusters x 3)
-                    colors = torch.zeros((num_nodes, 3), dtype=int)
+                    colors = torch.zeros((num_nodes, 3))
                     colors[perm, :] = self.cluster_colors[:perm.shape[0]]
 
                     # perform inverse thing from ASAP (color the nodes that effected the outcome)
                     # Crucially, colors is 0 for all nodes that are not in perm, so their values are not gonna effect the result
                     color_to_edge = colors[edge_index[1]] * score.view(-1, 1)
-                    colors = scatter(color_to_edge, edge_index[0], dim=0, reduce='add')
+                    colors = scatter(color_to_edge, edge_index[0], dim=0, reduce='sum')
+                    colors[perm, :] = self.cluster_colors[:perm.shape[
+                        0]]  # Make sure the selected nodes actually have their color (with full opacity)
                     for i in range(num_nodes):
                         node_table.add_data(graph_i, pool_step, i, colors[i, 0].item(),
                                             colors[i, 1].item(), colors[i, 2].item(),
@@ -245,7 +245,7 @@ class ASAPBlock(PoolBlock):
                     # [3, num_edges] where the first row seems to be constant 0, indicating the graph membership
                     for i in range(edge_index.shape[1]):
                         edge_table.add_data(graph_i, pool_step, edge_index[0, i].item(), edge_index[1, i].item(),
-                                            2*score[i].item())
+                                            2 * score[i].item())
         log(dict(
             # graphs_table=graphs_table
             node_table=node_table,
@@ -253,9 +253,163 @@ class ASAPBlock(PoolBlock):
         ), step=epoch)
 
 
+def _calculate_local_clusters(concepts: torch.Tensor, adj: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """
+    :param concepts: [batch_size, max_num_nodes] integer array with values in {0, ..., num_concepts - 1}
+    :param adj: [batch_size, max_num_nodes ]
+    :param mask: [batch_size, max_num_nodes]
+    :return: [batch_size, max_num_nodes] integer array with values in {0, ..., max_num_clusters} that maps all
+        connected nodes of the same color to one cluster. Crucially, value 0 is reserved for masked nodes and should be
+        removed after scatter.
+    """
+    batch_size = adj.shape[0]
+    num_nodes = adj.shape[1]
+    clusters = torch.zeros_like(concepts, dtype=torch.long)
 
-__all_dense__ = [DiffPoolBlock]
+    def rec_color(b: int, i: int):
+        clusters[b, i] = cur_color
+        for j in range(num_nodes):
+            # for now we assume float values in {0, 1} and use 0.5 as threshold to
+            # avoid numerical instabilities when doing e.g. == 0
+            if mask[b, j] == 0 and clusters[b, j] == 0 and adj[b, i, j] > 0.5 and concepts[b, i] == concepts[b, j]:
+                rec_color(b, j)
+
+    for b in range(batch_size):
+        cur_color = 1
+        for i in range(num_nodes):
+            if mask[b,i] and clusters[b, i] == 0:
+                rec_color(b, i)
+                cur_color += 1
+
+    return clusters
+
+def _calculate_local_clusters_scipy(concepts: torch.Tensor, adj: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """
+    :param concepts: [batch_size, max_num_nodes] integer array with values in {0, ..., num_concepts - 1}
+    :param adj: [batch_size, max_num_nodes, max_num_nodes]
+    :param mask: [batch_size, max_num_nodes]
+    :return: [batch_size, max_num_nodes] integer array with values in {0, ..., max_num_clusters} that maps all
+        connected nodes of the same color to one cluster. Crucially, value 0 is reserved for masked nodes and should be
+        removed after scatter.
+    """
+    # [batch_size, max_num_nodes, max_num_nodes]: masking all edges between nodes of different color
+    adj = torch.where(concepts[:, :, None] == concepts[:, None, :], adj, 0)
+    _, assignments = graphutils.dense_components(adj, mask)
+    return assignments
+
+
+def _perturbed_clustering(x: torch.Tensor, adj: torch.Tensor,
+                          cluster_membership_fun: typing.Callable[[torch.Tensor], torch.Tensor],
+                          mask: torch.Tensor) -> typing.Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    TODO at least use concept predictions instead of x as the thing we differentiate w.r.t.
+    TODO does it make sense to apply things like softmax anyway to get closer to the values we round to before the
+     non-differentiable operations?
+    TODO use mask?
+    TODO: this is NOT theoretically sound yet
+    TODO: Even if I plug this in here, I will never get gradients with respect to edge index.
+    -> This is fine for the first pooling step as I can't change the initial graph/edges anyway
+        -> although that would be an interesting approach for graph rewiring
+    -> In the future, maybe I could use a float adjacency matrix and enable require_grad to allow not only the
+        node values at layer k-1 but also the graph structure at layer k-1 to be influenced by the outcome of layer k
+        - For this, I might be able to maintain a float adjacency matrix and use Gumble softmax to discretize it in
+          the actual steps (Caution: That kinda means we're using Gumble softmax in some generalization of Gumble
+          softmax)
+
+    :param x: [batch_size, max_num_nodes, hidden_dim]
+    :param adj: [batch_size, max_num_nodes, max_num_nodes]
+    :param cluster_membership_fun: [batch_size, max_num_nodes, hidden_dim] -> [batch_size, max_num_nodes, num_concepts]
+    :param mask: [batch_size, max_num_nodes]???
+    :return:
+        x_new: [batch_size, max_num_clusters, hidden_dim]
+        adj_new: [batch_size, max_num_clusters, max_num_clusters]
+        mask_new: [batch_size, max_num_clusters]
+        assignments: [batch_size, max_num_nodes] maps nodes to (integer cluster ids). Special cluster 0 reserved for masked nodes
+    """
+    # [batch_size, max_num_nodes, num_concepts]
+    cluster_memberships = cluster_membership_fun(x)
+    concept_assignments = torch.argmax(cluster_memberships, dim=-1)
+    # [batch_size, max_num_nodes]
+    # assignments = _calculate_local_clusters(concept_assignments, adj, mask)
+    assignments = _calculate_local_clusters_scipy(concept_assignments, adj, mask)
+
+    # [batch_size, max_num_clusters, hidden_dim] summed representations of the nodes in each cluster with index 0 (masked nodes) removed
+    x_new = scatter(x, assignments[:, :, None], reduce="sum", dim=-2)[:, 1:, :]
+    # [batch_size, max_num_nodes, max_num_clusters]: for each node: all clusters it points to (with index 0 (masked nodes) removed)
+    adj_new = scatter(adj, assignments[:, :, None], reduce="max", dim=-2)[:, 1:, :]
+    # [batch_size, max_num_clusters, max_num_clusters]: for each cluster: all clusters it points to  (with index 0 (masked nodes) removed)
+    adj_new = scatter(adj_new, assignments[:, None, :], reduce="max", dim=-1)[:, :, 1:]
+
+    # [batch_size] Note that this gives the number of clusters, not the index because 0 is the placeholder for masked nodes
+
+    # [batch_size]
+    num_clusters, _ = torch.max(assignments, dim=-1)
+    # [batch_size, max_num_clusters]: True iff cluster/new node index is valid / less than the number of clusters in that batch element
+    mask_new = torch.arange(x_new.shape[-2], device=custom_logger.device)[None, :] < num_clusters[:, None]
+    return x_new, adj_new, mask_new, assignments
+
+
+class PerturbedBlock(PoolBlock):
+    """
+    TODO: Main takeaway: Gradient Estimation via Monte Carlo Sampling might be a good idea. Main challenge:
+        - Is there any way I can "merge" to a single gradient after a layer like they did?
+            - Otherwise, the number of examples would grow exponentially in the pooling layers
+            - But I think it could still be feasible for moderately sized graphs with 2 optimizations:
+                1. Only recompute clustering if the soft input concept assignment change the hard assignment of a node
+                    (makes larger numbers of samples feasible)
+                2. Maybe there is some way to average over output embeddings and only get one forward pass per different
+                    output graph structure. Kinda doubt it though as we can't jus average the inputs in DL to get average
+                    gradients
+
+
+
+    TODO If this works, it could be expanded with sth like stick-breaking VAE to support a variable number of clusters
+    """
+
+    def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
+                 activation_function=F.relu, forced_embeddings=None, num_concepts: int = None,
+                 **kwargs):
+        super().__init__(embedding_sizes, conv_type, activation_function, forced_embeddings, **kwargs)
+        self.embedding_convs = torch.nn.ModuleList([conv_type(embedding_sizes[i], embedding_sizes[i + 1])
+                                                    for i in range(len(embedding_sizes) - 1)])
+
+        self.concept_layer = torch.nn.Sequential(
+            torch.nn.Linear(embedding_sizes[-1], embedding_sizes[-1]),
+            torch.nn.ReLU(),
+            torch.nn.Linear(embedding_sizes[-1], num_concepts))
+
+    def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None, num_samples=100):
+        for conv in self.embedding_convs:
+            x = self.activation_function(conv(x, adj))
+        if self.forced_embeddings is not None:
+            x = torch.ones(x.shape[:-1] + (self.num_output_features,), device=x.device) * self.forced_embeddings
+        # TODO this is fine for the first layer as the input graph is fixed but does not allow us to back-propagate from
+        #  later layers to adjust the structure in previous ones. Maybe Gumbel softmax??
+        # TODO check that what they do actually resembles repeat_interleave not repeat. Otherwise, also change averaging
+        #  of output accordingly
+        adj_all = torch.repeat_interleave(adj, num_samples, dim=0)
+        mask_all = torch.repeat_interleave(mask, num_samples, dim=0)
+        cluster_fun = partial(_perturbed_clustering, adj=adj_all, cluster_membership_fun=self.concept_layer,
+                              mask=mask_all)
+        # TODO
+        # print("num_samples seems to increase the batch dimension of the input whereas none of the other stuff (adj, ...)"
+        #       "get broadcasted. Thought recalculating everything (clustering etc) would be deadly but just realized "
+        #       "there's no way around this as the whole differentiability relies on it.")
+        cluster_fun = perturbations.perturbed(cluster_fun, device=custom_logger.device, num_samples=num_samples)
+
+        # x_new: [batch_size, max_num_clusters, embedding_size]
+        # adj_new: [batch_size * num_samples, max_num_clusters, max_num_clusters]
+        # mask_new: [batch_size * num_samples, max_num_clusters]
+        x_new, adj_new, mask_new, assignments = cluster_fun(x)
+        # TODO those 2 choices can't really work, check code
+        adj_new = torch.mean(adj_new.reshape(num_samples, -1, adj_new.shape[-2], adj_new.shape[-1]), dim=0)
+        mask_new, _ = torch.max(mask_new.reshape(num_samples, -1, mask_new.shape[-1]), dim=0)
+        return x_new, adj_new, None, 0, assignments, x, mask_new
+
+
+__all_dense__ = [DiffPoolBlock, PerturbedBlock]
 __all_sparse__ = [ASAPBlock]
+
 
 def from_name(name: str, dense_data: bool):
     for b in __all_dense__ if dense_data else __all_sparse__:

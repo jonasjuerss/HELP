@@ -22,7 +22,6 @@ from data_generation.motifs import BinaryTreeMotif, HouseMotif, FullyConnectedMo
 
 DENSE_CONV_TYPES = [DenseGCNConv]
 SPARSE_CONV_TYPES = [GCNConv]
-device = None
 
 def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[DataLoader, DenseDataLoader], epoch: int,
                      pooling_loss_weight: float, dense_data: bool):
@@ -92,6 +91,11 @@ current_dataset = UniqueMotifCategorizationDataset(BinaryTreeMotif(5, [0], num_c
                                                     FullyConnectedMotif(5, [1], num_colors)],
                                                     [[0.4, 0.6], [0.4, 0.6]])
                                                    # [[0.25, 0.25, 0.25, 0.25], [0.25, 0.25, 0.25, 0.25]])
+def parse_json_str(s: str):
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ["\"", "'"]:
+        s = s[1:-2] # remove possible quotation marks around whole json
+    return json.loads(s)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -111,28 +115,31 @@ if __name__ == "__main__":
                         default=[[16, 16, 16, 16, 16, 1]], dest='layer_sizes',
                         help='The layer sizes to use. Example: --add_layer 16 32 --add_layer 32 64 16 results in a '
                              'network with 2 pooling steps where 5 message passes are performed before the first and ')
-    parser.add_argument('--add_pool_block', type=json.loads, nargs='+', action='append',
+    parser.add_argument('--add_pool_block', type=parse_json_str, nargs='+',
                         # default=[{"num_output_layers": [4]}],
-                        default=[{"num_output_nodes": 4}],
+                        # default=[{"num_output_nodes": 8}],
+                        # default=[{"num_concepts": 3}],
+                        # default=[],
                         dest='pool_block_args',
                         help="Additional arguments for each pool block")
     # parser.add_argument('--nodes_per_layer', type=int, default=[4],
     #                     help='The number of nodes after each pooling step for architectures like DiffPool which require'
     #                          ' to pre-specify that. Note that the last one should be 1 for classification')
 
-    parser.add_argument('--conv_type', type=str, default=["DenseGCNConv", "GCNConv"][1],
+    parser.add_argument('--conv_type', type=str, default="DenseGCNConv", choices=["DenseGCNConv", "GCNConv"],
                         help='The type of graph convolution to use.')
     parser.add_argument('--output_layer', type=str, default="DenseClassifier",
                         help='The type of graph convolution to use.')
-    parser.add_argument('--output_layer_merge', type=str, default=["flatten", "none", "sum", "avg"][0],
+    # TODO sum might be too weak, implement Pietro's global pool
+    parser.add_argument('--output_layer_merge', type=str, default="flatten", choices=["flatten", "none", "sum", "avg"],
                         help='How to merge the output encodings of all nodes after the last pooling step for the final '
                              'classification layer. \"flatten\" only works if the number of clusters in the last graph '
                              'is constant/independent of the input graph size and \"none\" only if the chosen '
                              'classifier can deal with a set of inputs.')
-    parser.add_argument('--pooling_type', type=str, default=["DiffPool", "ASAP"][1],
+    parser.add_argument('--pooling_type', type=str, default="Perturbed", choices=["DiffPool", "ASAP", "Perturbed"],
                         help='The type of pooling to use.')
 
-    parser.add_argument('--dataset', type=json.loads, default=current_dataset.__dict__(),
+    parser.add_argument('--dataset', type=parse_json_str, default=current_dataset.__dict__(),
                         help="A json that defines the current dataset")
     parser.add_argument('--min_nodes', type=int, default=0,
                         help='Minimum number of nodes for a graph in the dataset. All other graphs are discarded. '
@@ -159,7 +166,7 @@ if __name__ == "__main__":
     parser.add_argument('--gnn_activation', type=str, default="leaky_relu",
                         help='Activation function to be used in between the GNN layers')
 
-    parser.set_defaults(dense_data=False)
+    parser.set_defaults(dense_data=True)
     parser.add_argument('--sparse_data', action='store_false', dest='dense_data',
                         help='Switches from a dense representation of graphs (dummy nodes are added so that each of '
                              'them has the same number of nodes) to a sparse one.')
@@ -184,6 +191,7 @@ if __name__ == "__main__":
     args = custom_logger.init(args)
 
     device = torch.device(args.device)
+    custom_logger.device = device
     torch.manual_seed(args.seed)
 
     dataset = typing.cast(CustomDataset, from_dict(args.dataset))
