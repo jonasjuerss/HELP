@@ -16,7 +16,8 @@ import output_layers
 import poolblocks.poolblock
 from custom_logger import log
 from custom_net import CustomNet
-from data_generation.custom_dataset import UniqueMotifCategorizationDataset, CustomDataset
+from data_generation.custom_dataset import UniqueMotifCategorizationDataset, CustomDataset, \
+    UniqueMultipleOccurrencesMotifCategorizationDataset
 from data_generation.deserializer import from_dict
 from data_generation.motifs import BinaryTreeMotif, HouseMotif, FullyConnectedMotif
 
@@ -86,11 +87,10 @@ def log_formulas(model: CustomNet, train_loader: DataLoader, test_loader: DataLo
 
 
 num_colors = 2
-current_dataset = UniqueMotifCategorizationDataset(BinaryTreeMotif(5, [0], num_colors),
-                                                   [HouseMotif([1], [1], num_colors),
-                                                    FullyConnectedMotif(5, [1], num_colors)],
-                                                    [[0.4, 0.6], [0.4, 0.6]])
-                                                   # [[0.25, 0.25, 0.25, 0.25], [0.25, 0.25, 0.25, 0.25]])
+current_dataset = UniqueMultipleOccurrencesMotifCategorizationDataset(BinaryTreeMotif(5, [0], num_colors),
+                                                                      [HouseMotif([1], [1], num_colors),
+                                                                       FullyConnectedMotif(5, [1], num_colors)],
+                                                                      [[0.4, 0.6], [0.4, 0.6]])# [[0.25, 0.25, 0.25, 0.25], [0.25, 0.25, 0.25, 0.25]])
 def parse_json_str(s: str):
     if len(s) >= 2 and s[0] == s[-1] and s[0] in ["\"", "'"]:
         s = s[1:-2] # remove possible quotation marks around whole json
