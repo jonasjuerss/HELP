@@ -55,6 +55,10 @@ class CustomDataset(seri.ArgSerializable):
             size = [num_nodes - data.x.size(0)] + list(data.x.size())[1:]
             data.x = torch.cat([data.x, data.x.new_zeros(size)], dim=0)
 
+        if data.annotations is not None:
+            size = [num_nodes - data.annotations.size(0)] + list(data.annotations.size())[1:]
+            data.annotations = torch.cat([data.annotations, data.annotations.new_zeros(size)], dim=0)
+
         if data.pos is not None:
             size = [num_nodes - data.pos.size(0)] + list(data.pos.size())[1:]
             data.pos = torch.cat([data.pos, data.pos.new_zeros(size)], dim=0)

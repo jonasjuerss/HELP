@@ -1,9 +1,10 @@
 import data_generation.motifs as motifs
 import data_generation.custom_dataset as custom_dataset
 
-__all__ = [motifs.HouseMotif, motifs.TriangleMotif, motifs.FullyConnectedMotif, motifs.BinaryTreeMotif,
+__all__ = [motifs.HouseMotif, motifs.FullyConnectedMotif, motifs.BinaryTreeMotif,
 
-           custom_dataset.UniqueMotifCategorizationDataset]
+           custom_dataset.UniqueMotifCategorizationDataset,
+           custom_dataset.UniqueMultipleOccurrencesMotifCategorizationDataset]
 
 from data_generation.serializer import ArgSerializable
 
