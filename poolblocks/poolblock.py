@@ -48,7 +48,7 @@ class PoolBlock(torch.nn.Module, abc.ABC):
         """
         pass
 
-    def log_assignments(self, model: 'CustomNet', graphs: typing.List[Data], epoch: int):
+    def log_assignments(self, model: 'CustomNet', data: Data, num_graphs_to_log: int, epoch: int):
         pass
 
 
@@ -115,19 +115,19 @@ class DiffPoolBlock(PoolBlock):
         mask = None
         return new_embeddings, new_adj, None, loss_l + loss_e, pool, embedding, mask
 
-    def log_assignments(self, model: 'CustomNet', graphs: typing.List[Data], epoch: int):
+    def log_assignments(self, model: 'CustomNet', data: Data, num_graphs_to_log: int, epoch: int):
         node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "label", "activations"])
         edge_table = wandb.Table(["graph", "pool_step", "source", "target"])
         device = self.embedding_convs[0].bias.device
         with torch.no_grad():
-            for graph_i, data in enumerate(graphs):
-                data = data.clone().detach().to(device)
-                num_nodes = data.num_nodes  # note that this will be changed to tensor in model call
-                out, concepts, _, pool_assignments, pool_activations = model(data)
+            data = data.clone().detach().to(device)
+            out, concepts, _, pool_assignments, pool_activations = model(data)
+            for graph_i in range(num_graphs_to_log):
 
                 for pool_step, assignment in enumerate(pool_assignments[:1]):
+                    num_nodes = data.num_nodes[graph_i]
                     # [num_nodes, num_clusters]
-                    assignment = torch.softmax(assignment, dim=-1)  # usually performed by diffpool function
+                    assignment = torch.softmax(assignment[graph_i], dim=-1)  # usually performed by diffpool function
                     assignment = assignment.detach().cpu().squeeze(0)  # remove batch dimensions
 
                     if self.cluster_colors.shape[1] < assignment.shape[1]:
@@ -136,19 +136,19 @@ class DiffPoolBlock(PoolBlock):
 
                     # [num_nodes, 3] (intermediate dimensions: num_nodes x num_clusters x 3)
                     colors = torch.sum(assignment[:, :, None] * self.cluster_colors[:, :assignment.shape[1], :], dim=1)[
-                             :data.num_nodes, :]
+                             :num_nodes, :]
                     colors = torch.round(colors * 255).to(int)
                     for i in range(num_nodes):
                         node_table.add_data(graph_i, pool_step, i, colors[i, 0].item(),
                                             colors[i, 1].item(), colors[i, 2].item(),
                                             ", ".join([f"{m.item() * 100:.0f}%" for m in assignment[i].cpu()]),
                                             ", ".join([f"{m.item():.2f}" for m in
-                                                       pool_activations[pool_step][0, i, :].cpu()]))
+                                                       pool_activations[pool_step][graph_i, i, :].cpu()]))
 
                     # [3, num_edges] where the first row seems to be constant 0, indicating the graph membership
-                    edge_index, _, _ = adj_to_edge_index(data.adj, data.mask if hasattr(data, "mask") else None)
+                    edge_index, _, _ = adj_to_edge_index(data.adj[graph_i], data.mask[graph_i:graph_i+1] if hasattr(data, "mask") else None)
                     for i in range(edge_index.shape[1]):
-                        edge_table.add_data(graph_i, pool_step, edge_index[1, i].item(), edge_index[2, i].item())
+                        edge_table.add_data(graph_i, pool_step, edge_index[0, i].item(), edge_index[1, i].item())
         log(dict(
             # graphs_table=graphs_table
             node_table=node_table,

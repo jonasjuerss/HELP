@@ -47,7 +47,9 @@ class MaskedSum(torch.nn.Module):
         :param mask: [batch_size, max_num_output_nodes] (booleans)
         :return: [batch_size, num_output_nodes * num_features]
         """
-        return torch.sum(input * batch_or_mask[..., None], dim=-2)
+        if batch_or_mask is not None:
+            input = input * batch_or_mask[..., None]
+        return torch.sum(input, dim=-2)
 
 # class MaskedFunctionModule(FunctionModule):
 #
