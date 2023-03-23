@@ -6,9 +6,10 @@ from typing import List
 import torch
 import torch.nn.functional as F
 import wandb
+from fast_pytorch_kmeans import KMeans
 from torch_geometric.data import Data
 from torch_geometric.nn import dense_diff_pool, DenseGCNConv
-from torch_geometric.utils import add_remaining_self_loops
+from torch_geometric.utils import add_remaining_self_loops, to_dense_batch
 from torch_scatter import scatter
 
 import custom_logger
@@ -32,17 +33,18 @@ class PoolBlock(torch.nn.Module, abc.ABC):
                 edge_weights=None):
         """
         Either takes x, adj and mask (for dense data) or x, edge_index and batch (for sparse data)
-        :param x: [batch, num_nodes, num_features]
-        :param adj_or_edge_index:
-        :param mask_or_batch:
+        :param x: [batch, num_nodes_max, num_features] (dense) or [num_nodes_total, num_features] (sparse)
+        :param adj_or_edge_index: [batch, num_nodes_max, num_nodes_max] or [2, num_edges_total]
+        :param mask_or_batch: [batch, num_nodes_max] or [num_nodes_total]
+        :param edge_weights:
         :return:
-        new_embeddings [batch, num_nodes_new, num_features_new] or [num_nodes_new_total, num_features_new]
-        new_adj_or_edge_index
-        new_edge_weights (for sparse pooling methods were necessary)
-        pool_loss
-        pool: assignment
-        old_embeddings: Embeddings that went into the pooling operation
-        batch_or_mask
+        - new_embeddings [batch, num_nodes_new, num_features_new] or [num_nodes_new_total, num_features_new]
+        - new_adj_or_edge_index
+        - new_edge_weights (for sparse pooling methods were necessary)
+        - pool_loss
+        - pool: assignment
+        - old_embeddings: Embeddings that went into the pooling operation
+        - batch_or_mask
         """
         pass
 
@@ -82,7 +84,7 @@ class DiffPoolBlock(PoolBlock):
         if self.forced_embeddings is None:
             for conv in self.embedding_convs:
                 # print("i", embedding.shape, adj.shape)
-                embedding = self.activation_function(conv(embedding, adj))
+                embedding = self.activation_function(conv(embedding, adj, mask))
                 # embedding = F.dropout(embedding, training=self.training)
 
             # Don't need the softmax part from http://arxiv.org/abs/2207.13586 as my concepts are determined by the clusters
@@ -341,8 +343,6 @@ def _perturbed_clustering(x: torch.Tensor, adj: torch.Tensor,
     adj_new = scatter(adj_new, assignments[:, None, :], reduce="max", dim=-1)[:, :, 1:]
 
     # [batch_size] Note that this gives the number of clusters, not the index because 0 is the placeholder for masked nodes
-
-    # [batch_size]
     num_clusters, _ = torch.max(assignments, dim=-1)
     # [batch_size, max_num_clusters]: True iff cluster/new node index is valid / less than the number of clusters in that batch element
     mask_new = torch.arange(x_new.shape[-2], device=custom_logger.device)[None, :] < num_clusters[:, None]
@@ -372,6 +372,7 @@ class PerturbedBlock(PoolBlock):
         super().__init__(embedding_sizes, conv_type, activation_function, forced_embeddings, **kwargs)
         self.embedding_convs = torch.nn.ModuleList([conv_type(embedding_sizes[i], embedding_sizes[i + 1])
                                                     for i in range(len(embedding_sizes) - 1)])
+        self.num_output_features = embedding_sizes[-1]
 
         self.concept_layer = torch.nn.Sequential(
             torch.nn.Linear(embedding_sizes[-1], embedding_sizes[-1]),
@@ -379,10 +380,11 @@ class PerturbedBlock(PoolBlock):
             torch.nn.Linear(embedding_sizes[-1], num_concepts))
 
     def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None, num_samples=100):
-        for conv in self.embedding_convs:
-            x = self.activation_function(conv(x, adj))
         if self.forced_embeddings is not None:
             x = torch.ones(x.shape[:-1] + (self.num_output_features,), device=x.device) * self.forced_embeddings
+        else:
+            for conv in self.embedding_convs:
+                x = self.activation_function(conv(x, adj, mask))
         # TODO this is fine for the first layer as the input graph is fixed but does not allow us to back-propagate from
         #  later layers to adjust the structure in previous ones. Maybe Gumbel softmax??
         # TODO check that what they do actually resembles repeat_interleave not repeat. Otherwise, also change averaging
@@ -407,7 +409,58 @@ class PerturbedBlock(PoolBlock):
         return x_new, adj_new, None, 0, assignments, x, mask_new
 
 
-__all_dense__ = [DiffPoolBlock, PerturbedBlock]
+class SingleMCBlock(PoolBlock):
+    """
+    TODO: Challenge: how do I even generate a probability distribution over clustered graphs
+        -> just sample before the discrete operation (edge generation), I guess
+
+
+    TODO currently a little shady as we use 1-dimensional embeddings which we then cluster. Maybe turn this up
+        (from [layer_sizes])
+    """
+    def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
+                 activation_function=F.relu, forced_embeddings=None, num_concepts: int = None,
+                 **kwargs):
+        super().__init__(embedding_sizes, conv_type, activation_function, forced_embeddings, **kwargs)
+        self.embedding_convs = torch.nn.ModuleList([conv_type(embedding_sizes[i], embedding_sizes[i + 1])
+                                                    for i in range(len(embedding_sizes) - 1)])
+        self.num_output_features = embedding_sizes[-1]
+
+        # In the current setup, training this layer might be difficult as we don't really get gradients
+        # self.concept_layer = torch.nn.Sequential(
+        #     torch.nn.Linear(embedding_sizes[-1], embedding_sizes[-1]),
+        #     torch.nn.ReLU(),
+        #     torch.nn.Linear(embedding_sizes[-1], num_concepts))
+        self.kmeans = KMeans(n_clusters=num_concepts, mode='euclidean', verbose=0).fit_predict
+
+    def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None, num_samples=100):
+        if self.forced_embeddings is not None:
+            x = torch.ones(x.shape[:-1] + (self.num_output_features,), device=x.device) * self.forced_embeddings
+        else:
+            for conv in self.embedding_convs:
+                x = self.activation_function(conv(x, adj, mask))
+        batch_size = x.shape[0]
+        # [batch, max_num_nodes] take only the embeddings of nodes that are not masked (otherwise we would
+        # get different clusters). Apply kmeans and convert back to dense representation
+        concept_assignments, mask_temp = to_dense_batch(self.kmeans(x[mask]),
+                                                        batch=graphutils.batch_from_mask(mask, x.shape[1]),
+                                                        batch_size=batch_size, max_num_nodes=x.shape[1])
+        assert torch.all(mask_temp == mask)
+        # [batch_size, max_num_nodes] assigns each node to a cluster. 0 for masked nodes
+        assignments = _calculate_local_clusters_scipy(concept_assignments, adj, mask)
+        x_new = scatter(x, assignments[:, :, None], reduce="sum", dim=-2)[:, 1:, :]
+        # [batch_size, max_num_nodes, max_num_clusters]: for each node: all clusters it points to (with index 0 (masked nodes) removed)
+        adj_new = scatter(adj, assignments[:, :, None], reduce="max", dim=-2)[:, 1:, :]
+        # [batch_size, max_num_clusters, max_num_clusters]: for each cluster: all clusters it points to  (with index 0 (masked nodes) removed)
+        adj_new = scatter(adj_new, assignments[:, None, :], reduce="max", dim=-1)[:, :, 1:]
+
+        # [batch_size] Note that this gives the number of clusters, not the index because 0 is the placeholder for masked nodes
+        num_clusters, _ = torch.max(assignments, dim=-1)
+        # [batch_size, max_num_clusters]: True iff cluster/new node index is valid / less than the number of clusters in that batch element
+        mask_new = torch.arange(x_new.shape[-2], device=custom_logger.device)[None, :] < num_clusters[:, None]
+        return x_new, adj_new, None, 0, assignments, x, mask_new
+
+__all_dense__ = [DiffPoolBlock, PerturbedBlock, SingleMCBlock]
 __all_sparse__ = [ASAPBlock]
 
 
@@ -415,4 +468,7 @@ def from_name(name: str, dense_data: bool):
     for b in __all_dense__ if dense_data else __all_sparse__:
         if b.__name__ == name + "Block":
             return b
-    raise ValueError(f"Unknown pooling type {name} for dense_data={dense_data}!")
+    raise ValueError(f"Unknown pooling type {name} for dense_data={dense_data}!")#
+
+def valid_names() -> List[str]:
+    return [b.__name__[:-5] for b in __all_dense__] + [b.__name__[:-5] for b in __all_sparse__]

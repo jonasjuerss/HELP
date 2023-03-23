@@ -91,3 +91,6 @@ def dense_components(adj: torch.Tensor, mask: Optional[torch.Tensor], connection
     dense_component = torch.maximum(dense_component, torch.tensor([0], device=custom_logger.device))
     return dense_component.shape[1], dense_component
 
+def batch_from_mask(mask: torch.Tensor, max_num_nodes: int):
+    # Arange one number for each batch entry, repeat them to a [batch_size, max_num_nodes] array and apply the mask
+    return torch.arange(mask.shape[0], device=mask.device)[:, None].repeat_interleave(max_num_nodes, dim=1)[mask]

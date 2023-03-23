@@ -136,7 +136,7 @@ if __name__ == "__main__":
                              'classification layer. \"flatten\" only works if the number of clusters in the last graph '
                              'is constant/independent of the input graph size and \"none\" only if the chosen '
                              'classifier can deal with a set of inputs.')
-    parser.add_argument('--pooling_type', type=str, default="Perturbed", choices=["DiffPool", "ASAP", "Perturbed"],
+    parser.add_argument('--pooling_type', type=str, default="Perturbed", choices=poolblocks.poolblock.valid_names(),
                         help='The type of pooling to use.')
 
     parser.add_argument('--dataset', type=parse_json_str, default=current_dataset.__dict__(),
