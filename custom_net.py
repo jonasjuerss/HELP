@@ -108,6 +108,16 @@ class CustomNet(torch.nn.Module, abc.ABC):
         self.output_layer.log_custom_losses(mode, epoch, dataset_length)
 
     def forward(self, data: Data):
+        """
+
+        :param data:
+        :return:
+            - out: [batch_size, num_classes] log softmax predictions
+            - concepts: []
+            - pooling_loss: additional loss from pooling (or 0)
+            - pooling_assignment:
+            - pooling_activations:
+        """
         ndim = data.x.ndim
         # Note that a batch dimension is only needed for dense representation
         if ndim == 2 and hasattr(data, "adj"):

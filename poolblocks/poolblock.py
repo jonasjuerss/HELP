@@ -432,6 +432,17 @@ class SingleMCBlock(PoolBlock):
         #     torch.nn.ReLU(),
         #     torch.nn.Linear(embedding_sizes[-1], num_concepts))
         self.kmeans = KMeans(n_clusters=num_concepts, mode='euclidean', verbose=0).fit_predict
+        self.cluster_colors = torch.tensor([
+            [22, 160, 133],
+            [243, 156, 18],
+            [142, 68, 173],
+            [39, 174, 96],
+            [192, 57, 43],
+            [44, 62, 80],
+            [41, 128, 185],
+            [39, 174, 96],
+            [211, 84, 0],
+            [121, 85, 72]], dtype=torch.float)
 
     def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None, num_samples=100):
         if self.forced_embeddings is not None:
@@ -458,7 +469,50 @@ class SingleMCBlock(PoolBlock):
         num_clusters, _ = torch.max(assignments, dim=-1)
         # [batch_size, max_num_clusters]: True iff cluster/new node index is valid / less than the number of clusters in that batch element
         mask_new = torch.arange(x_new.shape[-2], device=custom_logger.device)[None, :] < num_clusters[:, None]
-        return x_new, adj_new, None, 0, assignments, x, mask_new
+        return x_new, adj_new, None, 0, concept_assignments, x, mask_new
+
+    def log_assignments(self, model: 'CustomNet', data: Data, num_graphs_to_log: int, epoch: int):
+        # TODO adjust visualizations for other graphs to new signature
+        # IMPORTANT: Here it is crucial to have batches of the size used during training in the forward pass
+        # if using only a single example, some concepts might not be present but we still enforce the same number of
+        # clusters
+        node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "label", "activations"])
+        edge_table = wandb.Table(["graph", "pool_step", "source", "target"])
+        device = self.embedding_convs[0].bias.device
+        with torch.no_grad():
+            data = data.clone().detach().to(device)
+            # concepts: [batch_size, max_num_nodes_final_layer, embedding_dim_out_final_layer] the node embeddings of the final graph
+            # pool_assignments: []
+            out, concepts, _, pool_assignments, pool_activations = model(data)
+            for graph_i in range(num_graphs_to_log):
+
+                for pool_step, assignment in enumerate(pool_assignments):
+                    # [num_nodes] (with batch dimension and masked nodes removed)
+                    assignment = assignment[graph_i][data.mask[graph_i]].detach().cpu().squeeze(0)
+
+                    if self.cluster_colors.shape[0] < torch.max(assignment):
+                        raise ValueError(
+                            f"Only {self.cluster_colors.shape[0]} colors given to distinguish {torch.max(assignment)} "
+                            f"clusters!")
+
+                    # [num_nodes, 3] (intermediate dimensions: num_nodes x num_clusters x 3)
+                    colors = self.cluster_colors[assignment, :]
+                    for i in range(data.num_nodes[graph_i]):
+                        node_table.add_data(graph_i, pool_step, i, colors[i, 0].item(),
+                                            colors[i, 1].item(), colors[i, 2].item(),
+                                            "",
+                                            ", ".join([f"{m.item():.2f}" for m in
+                                                       pool_activations[pool_step][graph_i, i, :].cpu()]))
+
+                    # [3, num_edges] where the first row seems to be constant 0, indicating the graph membership
+                    edge_index, _, _ = adj_to_edge_index(data.adj[graph_i:graph_i+1, :, :], data.mask if hasattr(data, "mask") else None)
+                    for i in range(edge_index.shape[1]):
+                        edge_table.add_data(graph_i, pool_step, edge_index[0, i].item(), edge_index[1, i].item())
+        log(dict(
+            # graphs_table=graphs_table
+            node_table=node_table,
+            edge_table=edge_table
+        ), step=epoch)
 
 __all_dense__ = [DiffPoolBlock, PerturbedBlock, SingleMCBlock]
 __all_sparse__ = [ASAPBlock]

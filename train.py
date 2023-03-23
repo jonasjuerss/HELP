@@ -157,7 +157,7 @@ if __name__ == "__main__":
     parser.add_argument('--formula_log_freq', type=int, default=50,
                         help='Every how many epochs to log explanations to wandb. The final predictions will always be '
                              'logged, except for if this is negative.')
-    parser.add_argument('--graphs_to_log', type=int, default=3,
+    parser.add_argument('--graphs_to_log', type=int, default=6,
                         help='How many graphs from the training and testing set to log.')
     parser.add_argument('--forced_embeddings', type=float, default=None,
                         help='For debugging. If set, embeddings will not be calculated. Instead, all embeddings of '
@@ -211,28 +211,32 @@ if __name__ == "__main__":
         return d.num_nodes >= args.min_nodes
     train_data = [dataset.sample(dense=args.dense_data, condition=condition) for d in range(args.train_set_size)]
     test_data = [dataset.sample(dense=args.dense_data, condition=condition) for d in range(args.test_set_size)]
-    graphs_to_log = train_data[:args.graphs_to_log] + test_data[:args.graphs_to_log]
     if args.dense_data:
         train_loader = DenseDataLoader(train_data, batch_size=args.batch_size, shuffle=True)
         test_loader = DenseDataLoader(test_data, batch_size=args.batch_size, shuffle=True)
-        log_graph_loader = DenseDataLoader(graphs_to_log, batch_size=1, shuffle=False)
+        log_graph_loader = DenseDataLoader(test_data[:args.batch_size], batch_size=args.batch_size, shuffle=False)
+
     else:
         train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True)
         test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=True)
-        log_graph_loader = DataLoader(graphs_to_log, batch_size=1, shuffle=False)
+        log_graph_loader = DataLoader(test_data[:args.batch_size], batch_size=args.batch_size, shuffle=False)
+
+    # Get last (and only data batch from log_graph_loader)
+    for graphs_to_log in log_graph_loader:
+        pass
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
 
     for epoch in tqdm(range(args.num_epochs)):
         train_test_epoch(True, model, optimizer, train_loader, epoch, args.pooling_loss_weight, args.dense_data)
         if epoch % args.graph_log_freq == 0:
-            model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, epoch)
+            model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, args.graphs_to_log, epoch)
         if epoch % args.formula_log_freq == 0:
             log_formulas(model, train_loader, test_loader, dataset.class_names, epoch)
         train_test_epoch(False, model, optimizer, test_loader, epoch, args.pooling_loss_weight, args.dense_data)
 
     if args.graph_log_freq >= 0:
-        model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, epoch)
+        model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, args.graphs_to_log, epoch)
     if args.formula_log_freq >= 0:
         log_formulas(model, train_loader, test_loader, dataset.class_names, epoch)
 
