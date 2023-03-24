@@ -196,3 +196,9 @@ class CustomDatasetGraphTemplate(seri.ArgSerializable):
         # Edge index may contain duplicates but we deal with this in
         graph.add_edges_if_not_exist_edge_index(edge_index)
         return graph
+
+# class HierarchicalMotifDataset(CustomDataset):
+#     def __init__(self, highlevel_motifs: List[Motif], lowlevel_motifs: List[Motif], motif_probs: List[float], perturb: float = 0.0):
+#         super().__init__(max_nodes, num_classes, num_node_features, class_names, args)
+#     def _sample(self) -> Data:
+#         pass

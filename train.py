@@ -43,7 +43,7 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[Dat
             if train:
                 optimizer.zero_grad()
 
-            out, _, pooling_loss, _, _ = model(data)
+            out, _, pooling_loss, _, _, _, _ = model(data)
             target = data.y
             if dense_data:
                 # For some reason, DataLoader flattens y (e.g. for batch_size=64 and output size 2, it would create one
@@ -90,7 +90,8 @@ num_colors = 2
 current_dataset = UniqueMultipleOccurrencesMotifCategorizationDataset(BinaryTreeMotif(5, [0], num_colors),
                                                                       [HouseMotif([1], [1], num_colors),
                                                                        FullyConnectedMotif(5, [1], num_colors)],
-                                                                      [[0.4, 0.6], [0.4, 0.6]])# [[0.25, 0.25, 0.25, 0.25], [0.25, 0.25, 0.25, 0.25]])
+                                                                      [[0.25, 0.25, 0.25, 0.25], [0.25, 0.25, 0.25, 0.25]])
+                                                                        # [[0.4, 0.6], [0.4, 0.6]])#
 def parse_json_str(s: str):
     if len(s) >= 2 and s[0] == s[-1] and s[0] in ["\"", "'"]:
         s = s[1:-2] # remove possible quotation marks around whole json
@@ -112,10 +113,10 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=64,
                         help='The batch size to use.')
     parser.add_argument('--add_layer', type=int, nargs='+', action='append',
-                        default=[[16, 16, 16, 16, 16, 1]], dest='layer_sizes',
+                        default=[[16, 16, 16, 16, 16], [16, 16, 4]], dest='layer_sizes',
                         help='The layer sizes to use. Example: --add_layer 16 32 --add_layer 32 64 16 results in a '
                              'network with 2 pooling steps where 5 message passes are performed before the first and ')
-    parser.add_argument('--add_pool_block', type=parse_json_str, nargs='+',
+    parser.add_argument('--pool_blocks', type=parse_json_str, nargs='+',
                         # default=[{"num_output_layers": [4]}],
                         # default=[{"num_output_nodes": 8}],
                         # default=[{"num_concepts": 3}],

@@ -117,6 +117,8 @@ class CustomNet(torch.nn.Module, abc.ABC):
             - pooling_loss: additional loss from pooling (or 0)
             - pooling_assignment:
             - pooling_activations:
+            - all_batch_or_mask list of batch/mask tensors after each pooling step. Note that this does not include the
+                initial one given by the data object
         """
         ndim = data.x.ndim
         # Note that a batch dimension is only needed for dense representation
@@ -130,9 +132,11 @@ class CustomNet(torch.nn.Module, abc.ABC):
         elif ndim > 3:
             print("Multiple batch dimensions currently might not work as expected!")
 
-        concepts, pooling_loss, pooling_assignments, pooling_activations, batch_or_mask = self.graph_network(data)
+        concepts, pooling_loss, pooling_assignments, pooling_activations, batch_or_mask, adjs_or_edge_indices,\
+            all_batch_or_mask = self.graph_network(data)
         x = self.output_layer(self.merge_layer(input=concepts, batch_or_mask=batch_or_mask))
-        return F.log_softmax(x, dim=1), concepts, pooling_loss, pooling_assignments, pooling_activations
+        return F.log_softmax(x, dim=1), concepts, pooling_loss, pooling_assignments, pooling_activations,\
+            adjs_or_edge_indices, all_batch_or_mask
 
     def explain(self, train_loader: DataLoader, test_loader: DataLoader, class_names: List[str]):
         return self.output_layer.explain(self.graph_network, train_loader, test_loader, class_names)

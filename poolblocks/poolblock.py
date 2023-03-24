@@ -121,7 +121,7 @@ class DiffPoolBlock(PoolBlock):
         device = self.embedding_convs[0].bias.device
         with torch.no_grad():
             data = data.clone().detach().to(device)
-            out, concepts, _, pool_assignments, pool_activations = model(data)
+            out, concepts, _, pool_assignments, pool_activations, _, _ = model(data)
             for graph_i in range(num_graphs_to_log):
 
                 for pool_step, assignment in enumerate(pool_assignments[:1]):
@@ -483,12 +483,14 @@ class SingleMCBlock(PoolBlock):
             data = data.clone().detach().to(device)
             # concepts: [batch_size, max_num_nodes_final_layer, embedding_dim_out_final_layer] the node embeddings of the final graph
             # pool_assignments: []
-            out, concepts, _, pool_assignments, pool_activations = model(data)
+            out, concepts, _, pool_assignments, pool_activations, adjs, masks = model(data)
+            masks = [data.mask] + masks
+            adjs = [data.adj] + adjs
             for graph_i in range(num_graphs_to_log):
 
                 for pool_step, assignment in enumerate(pool_assignments):
                     # [num_nodes] (with batch dimension and masked nodes removed)
-                    assignment = assignment[graph_i][data.mask[graph_i]].detach().cpu().squeeze(0)
+                    assignment = assignment[graph_i][masks[pool_step][graph_i]].detach().cpu().squeeze(0)
 
                     if self.cluster_colors.shape[0] < torch.max(assignment):
                         raise ValueError(
@@ -497,7 +499,9 @@ class SingleMCBlock(PoolBlock):
 
                     # [num_nodes, 3] (intermediate dimensions: num_nodes x num_clusters x 3)
                     colors = self.cluster_colors[assignment, :]
-                    for i in range(data.num_nodes[graph_i]):
+                    for i, active in enumerate(masks[pool_step][graph_i]):
+                        if not active:
+                            continue
                         node_table.add_data(graph_i, pool_step, i, colors[i, 0].item(),
                                             colors[i, 1].item(), colors[i, 2].item(),
                                             "",
@@ -505,7 +509,8 @@ class SingleMCBlock(PoolBlock):
                                                        pool_activations[pool_step][graph_i, i, :].cpu()]))
 
                     # [3, num_edges] where the first row seems to be constant 0, indicating the graph membership
-                    edge_index, _, _ = adj_to_edge_index(data.adj[graph_i:graph_i+1, :, :], data.mask if hasattr(data, "mask") else None)
+                    edge_index, _, _ = adj_to_edge_index(adjs[pool_step][graph_i:graph_i+1, :, :],
+                                                         masks[pool_step][graph_i:graph_i+1])
                     for i in range(edge_index.shape[1]):
                         edge_table.add_data(graph_i, pool_step, edge_index[0, i].item(), edge_index[1, i].item())
         log(dict(

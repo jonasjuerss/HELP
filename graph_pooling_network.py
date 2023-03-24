@@ -15,6 +15,9 @@ class GraphPoolingNetwork(torch.nn.Module, abc.ABC):
                  conv_type=Type[torch.nn.Module], activation_function=torch.nn.functional.relu,
                  forced_embeddings: float=None):
         super().__init__()
+        if len(pool_block_args) != len(layer_sizes):
+            raise ValueError(f"Expected the length of the pool block arguments ({len(pool_block_args)}) to be the same "
+                             f"as the layer sizes ({len(layer_sizes)})!")
         self.layer_sizes = layer_sizes
         self.num_concepts = layer_sizes[-1][-1]
         self.pool_blocks = torch.nn.ModuleList()
@@ -43,12 +46,16 @@ class DenseGraphPoolingNetwork(GraphPoolingNetwork):
         pooling_loss = 0
         pooling_assignments = []
         pooling_activations = []
+        masks = []
+        adjs = []
         for block in self.pool_blocks:
             x, adj, _, temp_loss, pool, last_embedding, mask = block(x, adj, mask)
             pooling_loss += temp_loss
             pooling_assignments.append(pool)
             pooling_activations.append(last_embedding)
-        return x, pooling_loss, pooling_assignments, pooling_activations, mask
+            masks.append(mask)
+            adjs.append(adj)
+        return x, pooling_loss, pooling_assignments, pooling_activations, mask, adjs, masks
 
 class SparseGraphPoolingNetwork(GraphPoolingNetwork):
     def __init__(self, num_node_features: int, layer_sizes: List[List[int]],
@@ -64,6 +71,8 @@ class SparseGraphPoolingNetwork(GraphPoolingNetwork):
         pooling_loss = 0
         pooling_assignments = []
         pooling_activations = []
+        batches = []
+        edge_indices = []
         edge_weights = None
         for block in self.pool_blocks:
             x, edge_index, edge_weights, temp_loss, pool, last_embedding, batch = block(x, edge_index, batch,
@@ -71,4 +80,6 @@ class SparseGraphPoolingNetwork(GraphPoolingNetwork):
             pooling_loss += temp_loss
             pooling_assignments.append(pool)
             pooling_activations.append(last_embedding)
-        return x, pooling_loss, pooling_assignments, pooling_activations, batch
+            batches.append(batch)
+            edge_indices.append(edge_index)
+        return x, pooling_loss, pooling_assignments, pooling_activations, batch, edge_indices, batches
