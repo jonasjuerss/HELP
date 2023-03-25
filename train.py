@@ -36,8 +36,6 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[Dat
                      pooling_loss_weight: float, dense_data: bool):
     if train:
         model.train()
-    else:
-        model.eval()
     correct = 0
     sum_loss = 0
     sum_classification_loss = 0
@@ -86,6 +84,7 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[Dat
          f"{mode}_classification_loss": sum_classification_loss / dataset_len,
          f"{mode}_accuracy": correct / dataset_len, **distr_dict},
         step=epoch)
+    model.eval()  # make sure model is always in eval by default
 
 
 def log_formulas(model: CustomNet, train_loader: DataLoader, test_loader: DataLoader, class_names: typing.List[str],

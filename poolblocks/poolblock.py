@@ -51,6 +51,9 @@ class PoolBlock(torch.nn.Module, abc.ABC):
     def log_assignments(self, model: 'CustomNet', data: Data, num_graphs_to_log: int, epoch: int):
         pass
 
+    def start_epoch(self):
+        pass
+
 
 class DiffPoolBlock(PoolBlock):
     def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
@@ -420,7 +423,7 @@ class SingleMCBlock(PoolBlock):
     """
     def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
                  activation_function=F.relu, forced_embeddings=None, num_concepts: int = None,
-                 **kwargs):
+                 global_clusters: bool = True, **kwargs):
         super().__init__(embedding_sizes, conv_type, activation_function, forced_embeddings, **kwargs)
         self.embedding_convs = torch.nn.ModuleList([conv_type(embedding_sizes[i], embedding_sizes[i + 1])
                                                     for i in range(len(embedding_sizes) - 1)])
@@ -431,7 +434,12 @@ class SingleMCBlock(PoolBlock):
         #     torch.nn.Linear(embedding_sizes[-1], embedding_sizes[-1]),
         #     torch.nn.ReLU(),
         #     torch.nn.Linear(embedding_sizes[-1], num_concepts))
-        self.kmeans = KMeans(n_clusters=num_concepts, mode='euclidean', verbose=0).fit_predict
+        self.kmeans = KMeans(n_clusters=num_concepts, mode='euclidean', verbose=0)
+        self.seen_embeddings = torch.empty((0, self.num_output_features), device=custom_logger.device)
+        self.global_clusters = global_clusters
+        # In the first epoch, we haven't seen the data yet, so we always need to use local clusters. After that,
+        # use_global_clusters will be equal to global_clusters
+        self.use_global_clusters = False
         self.cluster_colors = torch.tensor([
             [22, 160, 133],
             [243, 156, 18],
@@ -451,9 +459,18 @@ class SingleMCBlock(PoolBlock):
             for conv in self.embedding_convs:
                 x = self.activation_function(conv(x, adj, mask))
         batch_size = x.shape[0]
+        if self.global_clusters and self.training:
+            # Only adding training data makes it impossible to generalize to new concepts during test but that's kinda
+            # unlikely anyway. Alternatively one could append test embeddings but then one would need to undo those
+            # changes before starting the next round of training to avoid the test data influencing the training
+            self.seen_embeddings = torch.cat((self.seen_embeddings, x[mask].detach()), dim=0)
+        if self.use_global_clusters:
+            concept_assignments = self.kmeans.predict(x[mask])
+        else:
+            concept_assignments = self.kmeans.fit_predict(x[mask])
         # [batch, max_num_nodes] take only the embeddings of nodes that are not masked (otherwise we would
         # get different clusters). Apply kmeans and convert back to dense representation
-        concept_assignments, mask_temp = to_dense_batch(self.kmeans(x[mask]),
+        concept_assignments, mask_temp = to_dense_batch(concept_assignments,
                                                         batch=graphutils.batch_from_mask(mask, x.shape[1]),
                                                         batch_size=batch_size, max_num_nodes=x.shape[1])
         assert torch.all(mask_temp == mask)
@@ -478,7 +495,7 @@ class SingleMCBlock(PoolBlock):
         # clusters
         node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "label", "activations"])
         edge_table = wandb.Table(["graph", "pool_step", "source", "target"])
-        device = self.embedding_convs[0].bias.device
+        device = custom_logger.device
         with torch.no_grad():
             data = data.clone().detach().to(device)
             # concepts: [batch_size, max_num_nodes_final_layer, embedding_dim_out_final_layer] the node embeddings of the final graph
@@ -518,6 +535,14 @@ class SingleMCBlock(PoolBlock):
             node_table=node_table,
             edge_table=edge_table
         ), step=epoch)
+
+    def start_epoch(self):
+        if not self.global_clusters:
+            return
+        self.use_global_clusters = True
+        self.kmeans.fit(self.seen_embeddings)
+        self.seen_embeddings = torch.empty((0, self.num_output_features), device=custom_logger.device)
+
 
 __all_dense__ = [DiffPoolBlock, PerturbedBlock, SingleMCBlock]
 __all_sparse__ = [ASAPBlock]
