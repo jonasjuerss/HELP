@@ -4,6 +4,7 @@ import os
 import typing
 from contextlib import nullcontext
 from datetime import datetime
+from multiprocessing import Process
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -91,9 +92,22 @@ def log_formulas(model: CustomNet, train_loader: DataLoader, test_loader: DataLo
                 epoch: int):
     model.explain(train_loader, test_loader, class_names)
 
-def log_embeddings(model: CustomNet, data_loader: DataLoader, dense_data: bool, epoch: int, save_path):
+def process_embeddings(embs, epoch, run):
     tsne = TSNE(n_components=2)
-    pca = PCA(n_components=2)
+    # pca = PCA(n_components=2)
+    for pool_step, emb in enumerate(embs):
+        emb = torch.cat(emb, dim=0).detach().numpy()
+        coords = tsne.fit_transform(X=emb)
+        # for row in range(coords.shape[0]):
+        # table.add_data(pool_step, *coords[row], "#000", "")
+        fig = px.scatter(x=coords[:, 1], y=coords[:, 0]) # , size=4
+        fig.update_traces(marker={'size': 4})
+        # path = os.path.join(save_path, f"scatter_{pool_step}.html")
+        # fig.write_html(path, auto_play=False)
+        # log({f"scatter_{pool_step}": wandb.Html(path)}, step=epoch)
+        log({f"embeddings_{pool_step}": fig}, _run=run, step=epoch)
+
+def log_embeddings(model: CustomNet, data_loader: DataLoader, dense_data: bool, epoch: int, save_path):
     # table too big to load (wandb only shows 10000 entries)
     # table = wandb.Table(columns=["pool_step", "x", "y", "point_color", "label"])
     with torch.no_grad():
@@ -107,16 +121,9 @@ def log_embeddings(model: CustomNet, data_loader: DataLoader, dense_data: bool, 
                 for i, act in enumerate(pool_activations):
                     embs[i].append(act[masks[i]].cpu())
             # list [num_pool_layers] with entries [num_nodes_total, layer_sizes[pool_ste][-1]]
-            for pool_step, emb in enumerate(embs):
-                emb = torch.cat(emb, dim=0).detach().numpy()
-                coords = tsne.fit_transform(X=emb)
-                #for row in range(coords.shape[0]):
-                    #table.add_data(pool_step, *coords[row], "#000", "")
-                fig = px.scatter(x=coords[:, 1], y=coords[:, 0], size=4)
-                #path = os.path.join(save_path, f"scatter_{pool_step}.html")
-                #fig.write_html(path, auto_play=False)
-                # log({f"scatter_{pool_step}": wandb.Html(path)}, step=epoch)
-                log({f"embeddings_{pool_step}": fig}, step=epoch)
+            # TSNE takes some time, so we can let this happen asynchronously
+            Process(target=process_embeddings, args=(embs, epoch, wandb.run)).start()
+
             #log(dict(embeddings=table), step=epoch)
         else:
             print("Logging embeddings not implemented for sparse data yet!")

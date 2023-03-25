@@ -6,6 +6,7 @@ def init(args):
         return wandb.config
     return args
 
-def log(*args, **kwargs):
-    if wandb.run is not None:
-        wandb.log(*args, **kwargs)
+def log(*args, _run=None, **kwargs):
+    run = wandb.run if _run is None else _run
+    if run is not None:
+        run.log(*args, **kwargs)
