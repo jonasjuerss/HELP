@@ -51,7 +51,7 @@ class PoolBlock(torch.nn.Module, abc.ABC):
     def log_assignments(self, model: 'CustomNet', data: Data, num_graphs_to_log: int, epoch: int):
         pass
 
-    def start_epoch(self):
+    def end_epoch(self):
         pass
 
 
@@ -452,7 +452,7 @@ class SingleMCBlock(PoolBlock):
             [211, 84, 0],
             [121, 85, 72]], dtype=torch.float)
 
-    def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None, num_samples=100):
+    def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None):
         if self.forced_embeddings is not None:
             x = torch.ones(x.shape[:-1] + (self.num_output_features,), device=x.device) * self.forced_embeddings
         else:
@@ -503,8 +503,10 @@ class SingleMCBlock(PoolBlock):
             out, concepts, _, pool_assignments, pool_activations, adjs, masks = model(data)
             masks = [data.mask] + masks
             adjs = [data.adj] + adjs
-            for graph_i in range(num_graphs_to_log):
 
+            ############################## Log Graphs ##############################
+
+            for graph_i in range(num_graphs_to_log):
                 for pool_step, assignment in enumerate(pool_assignments):
                     # [num_nodes] (with batch dimension and masked nodes removed)
                     assignment = assignment[graph_i][masks[pool_step][graph_i]].detach().cpu().squeeze(0)
@@ -521,7 +523,7 @@ class SingleMCBlock(PoolBlock):
                             continue
                         node_table.add_data(graph_i, pool_step, i, colors[i, 0].item(),
                                             colors[i, 1].item(), colors[i, 2].item(),
-                                            "",
+                                            f"Cluster {assignment[i]}",
                                             ", ".join([f"{m.item():.2f}" for m in
                                                        pool_activations[pool_step][graph_i, i, :].cpu()]))
 
@@ -530,13 +532,17 @@ class SingleMCBlock(PoolBlock):
                                                          masks[pool_step][graph_i:graph_i+1])
                     for i in range(edge_index.shape[1]):
                         edge_table.add_data(graph_i, pool_step, edge_index[0, i].item(), edge_index[1, i].item())
+
+            ############################## Log Concept Examples ##############################
+
+
         log(dict(
             # graphs_table=graphs_table
             node_table=node_table,
             edge_table=edge_table
         ), step=epoch)
 
-    def start_epoch(self):
+    def end_epoch(self):
         if not self.global_clusters:
             return
         self.use_global_clusters = True

@@ -141,6 +141,6 @@ class CustomNet(torch.nn.Module, abc.ABC):
     def explain(self, train_loader: DataLoader, test_loader: DataLoader, class_names: List[str]):
         return self.output_layer.explain(self.graph_network, train_loader, test_loader, class_names)
 
-    def start_epoch(self):
+    def end_epoch(self):
         for b in self.graph_network.pool_blocks:
-            b.start_epoch()
+            b.end_epoch()

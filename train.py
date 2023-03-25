@@ -286,6 +286,7 @@ if __name__ == "__main__":
         if epoch % args.formula_log_freq == 0:
             log_formulas(model, train_loader, test_loader, dataset.class_names, epoch)
         train_test_epoch(False, model, optimizer, test_loader, epoch, args.pooling_loss_weight, args.dense_data)
+        model.end_epoch()
 
     if args.graph_log_freq >= 0:
         model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, args.graphs_to_log, epoch)
