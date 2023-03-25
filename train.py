@@ -1,15 +1,22 @@
 import argparse
 import json
+import os
 import typing
 from contextlib import nullcontext
+from datetime import datetime
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
+import wandb
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
 from torch_geometric.loader import DataLoader, DenseDataLoader
 from torch_geometric.nn import DenseGCNConv, GCNConv
 from tqdm import tqdm
 from typing import Union
+import plotly.express as px
 
 import custom_logger
 import output_layers
@@ -84,6 +91,35 @@ def log_formulas(model: CustomNet, train_loader: DataLoader, test_loader: DataLo
                 epoch: int):
     model.explain(train_loader, test_loader, class_names)
 
+def log_embeddings(model: CustomNet, data_loader: DataLoader, dense_data: bool, epoch: int, save_path):
+    tsne = TSNE(n_components=2)
+    pca = PCA(n_components=2)
+    # table too big to load (wandb only shows 10000 entries)
+    # table = wandb.Table(columns=["pool_step", "x", "y", "point_color", "label"])
+    with torch.no_grad():
+        if dense_data:
+            # list: [num_pool_layers, num_batches] with entries [num_nodes_total_batch, layer_sizes[pool_ste][-1]]
+            embs = [[] for _ in model.graph_network.pool_blocks]
+            for data in data_loader:
+                data.to(custom_logger.device)
+                _, _, _, _, pool_activations, _, masks = model(data)
+                masks = [data.mask] + masks
+                for i, act in enumerate(pool_activations):
+                    embs[i].append(act[masks[i]].cpu())
+            # list [num_pool_layers] with entries [num_nodes_total, layer_sizes[pool_ste][-1]]
+            for pool_step, emb in enumerate(embs):
+                emb = torch.cat(emb, dim=0).detach().numpy()
+                coords = tsne.fit_transform(X=emb)
+                #for row in range(coords.shape[0]):
+                    #table.add_data(pool_step, *coords[row], "#000", "")
+                fig = px.scatter(x=coords[:, 1], y=coords[:, 0], size=4)
+                #path = os.path.join(save_path, f"scatter_{pool_step}.html")
+                #fig.write_html(path, auto_play=False)
+                # log({f"scatter_{pool_step}": wandb.Html(path)}, step=epoch)
+                log({f"embeddings_{pool_step}": fig}, step=epoch)
+            #log(dict(embeddings=table), step=epoch)
+        else:
+            print("Logging embeddings not implemented for sparse data yet!")
 
 
 num_colors = 2
@@ -177,13 +213,21 @@ if __name__ == "__main__":
 
     parser.add_argument('--seed', type=int, default=1,
                         help='The seed used for pytorch. This also determines the dataset if generated randomly.')
-
+    parser.add_argument('--save_path', type=str,
+                        default=os.path.join("models", datetime.now().strftime("%d-%m-%Y_%H-%M-%S")),
+                        help='The path to save the checkpoint to. Will be models/dd-mm-YY_HH-MM-SS.pt by default.')
     parser.add_argument('--device', type=str, default="cuda",
                         help='The device to train on. Allows to use CPU or different GPUs.')
     parser.set_defaults(use_wandb=True)
     parser.add_argument('--no_wandb', action='store_false', dest='use_wandb',
                         help='Turns off logging to wandb')
     args = parser.parse_args()
+
+    if os.path.exists(args.save_path):
+        raise ValueError(f"Checkpoint path already exists: {args.save_path}!")
+    else:
+        os.makedirs(args.save_path)
+
     for block_args in args.pool_block_args:
         if args.pooling_type in ["ASAP"] and block_args.get("num_output_nodes", -1) > args.min_nodes:
             print(f"The pooling method {args.pooling_type} cannot increase the number of nodes. Increasing "
@@ -232,6 +276,7 @@ if __name__ == "__main__":
         train_test_epoch(True, model, optimizer, train_loader, epoch, args.pooling_loss_weight, args.dense_data)
         if epoch % args.graph_log_freq == 0:
             model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, args.graphs_to_log, epoch)
+            log_embeddings(model, train_loader, args.dense_data, epoch, args.save_path)
         if epoch % args.formula_log_freq == 0:
             log_formulas(model, train_loader, test_loader, dataset.class_names, epoch)
         train_test_epoch(False, model, optimizer, test_loader, epoch, args.pooling_loss_weight, args.dense_data)
