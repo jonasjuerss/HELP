@@ -9,7 +9,7 @@ import wandb
 from fast_pytorch_kmeans import KMeans
 from torch_geometric.data import Data
 from torch_geometric.nn import dense_diff_pool, DenseGCNConv
-from torch_geometric.utils import add_remaining_self_loops, to_dense_batch
+from torch_geometric.utils import add_remaining_self_loops, to_dense_batch, k_hop_subgraph
 from torch_scatter import scatter
 
 import custom_logger
@@ -440,6 +440,7 @@ class SingleMCBlock(PoolBlock):
         # In the first epoch, we haven't seen the data yet, so we always need to use local clusters. After that,
         # use_global_clusters will be equal to global_clusters
         self.use_global_clusters = False
+        self.num_concepts = num_concepts
         self.cluster_colors = torch.tensor([
             [22, 160, 133],
             [243, 156, 18],
@@ -509,38 +510,62 @@ class SingleMCBlock(PoolBlock):
             for graph_i in range(num_graphs_to_log):
                 for pool_step, assignment in enumerate(pool_assignments):
                     # [num_nodes] (with batch dimension and masked nodes removed)
-                    assignment = assignment[graph_i][masks[pool_step][graph_i]].detach().cpu().squeeze(0)
+                    assignment = assignment[graph_i][masks[pool_step][graph_i]].detach().cpu()
 
-                    if self.cluster_colors.shape[0] < torch.max(assignment):
+                    if self.cluster_colors.shape[0] <= torch.max(assignment):
                         raise ValueError(
                             f"Only {self.cluster_colors.shape[0]} colors given to distinguish {torch.max(assignment)} "
                             f"clusters!")
 
                     # [num_nodes, 3] (intermediate dimensions: num_nodes x num_clusters x 3)
                     colors = self.cluster_colors[assignment, :]
-                    for i, active in enumerate(masks[pool_step][graph_i]):
-                        if not active:
-                            continue
+                    for i, i_old in enumerate(masks[pool_step][graph_i].nonzero().squeeze(1)):
                         node_table.add_data(graph_i, pool_step, i, colors[i, 0].item(),
                                             colors[i, 1].item(), colors[i, 2].item(),
                                             f"Cluster {assignment[i]}",
                                             ", ".join([f"{m.item():.2f}" for m in
-                                                       pool_activations[pool_step][graph_i, i, :].cpu()]))
+                                                       pool_activations[pool_step][graph_i, i_old, :].cpu()]))
 
                     # [3, num_edges] where the first row seems to be constant 0, indicating the graph membership
                     edge_index, _, _ = adj_to_edge_index(adjs[pool_step][graph_i:graph_i+1, :, :],
                                                          masks[pool_step][graph_i:graph_i+1])
                     for i in range(edge_index.shape[1]):
                         edge_table.add_data(graph_i, pool_step, edge_index[0, i].item(), edge_index[1, i].item())
-
+            log(dict(
+                # graphs_table=graphs_table
+                node_table=node_table,
+                edge_table=edge_table
+            ), step=epoch)
             ############################## Log Concept Examples ##############################
+            SAMPLES_PER_CONCEPT = 3
+            # This is not ideal as we only sample concepts from the same (first) batch. But we could increase it's size
+
+            for concept in range(self.num_concepts):
+                node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "border_color", "label",
+                                          "activations"])
+                edge_table = wandb.Table(["graph", "pool_step", "source", "target"])
+                for pool_step, assignment in enumerate(pool_assignments):
+                    samples_seen = 0
+                    for sample, node in (torch.logical_and(masks[pool_step], assignment == concept)).nonzero():
+                        if samples_seen >= SAMPLES_PER_CONCEPT:
+                            break
+                        edge_index_prev, _, _ = adj_to_edge_index(adjs[pool_step][sample])
+                        subset, edge_index, _, _ = k_hop_subgraph(node.item(), len(self.embedding_convs), edge_index_prev,
+                                                                  relabel_nodes=True)
+                        for i in range(subset.shape[0]):
+                            node_table.add_data(samples_seen, pool_step, i, 0, 0, 0,
+                                                "#F00" if subset[i] == node.item() else "#000",
+                                                f"", "")
+                        for i in range(edge_index.shape[1]):
+                            edge_table.add_data(samples_seen, pool_step, edge_index[0, i].item(), edge_index[1, i].item())
+                        samples_seen += 1
+                log({
+                    f"concept_node_table_{concept}": node_table,
+                    f"concept_edge_table_{concept}": edge_table
+                }, step=epoch)
 
 
-        log(dict(
-            # graphs_table=graphs_table
-            node_table=node_table,
-            edge_table=edge_table
-        ), step=epoch)
+
 
     def end_epoch(self):
         if not self.global_clusters:

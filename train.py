@@ -155,7 +155,7 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=64,
                         help='The batch size to use.')
     parser.add_argument('--add_layer', type=int, nargs='+', action='append',
-                        default=[[16, 16, 16, 16, 16], [16, 16, 4]], dest='layer_sizes',
+                        default=[[16, 16, 16], [16, 16, 4]], dest='layer_sizes',
                         help='The layer sizes to use. Example: --add_layer 16 32 --add_layer 32 64 16 results in a '
                              'network with 2 pooling steps where 5 message passes are performed before the first and ')
     parser.add_argument('--pool_blocks', type=parse_json_str, nargs='+',
@@ -282,7 +282,7 @@ if __name__ == "__main__":
         train_test_epoch(True, model, optimizer, train_loader, epoch, args.pooling_loss_weight, args.dense_data)
         if epoch % args.graph_log_freq == 0:
             model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, args.graphs_to_log, epoch)
-            log_embeddings(model, train_loader, args.dense_data, epoch, args.save_path)
+            # log_embeddings(model, train_loader, args.dense_data, epoch, args.save_path)
         if epoch % args.formula_log_freq == 0:
             log_formulas(model, train_loader, test_loader, dataset.class_names, epoch)
         train_test_epoch(False, model, optimizer, test_loader, epoch, args.pooling_loss_weight, args.dense_data)
