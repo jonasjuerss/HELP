@@ -546,7 +546,10 @@ class SingleMCBlock(PoolBlock):
                 edge_table = wandb.Table(["graph", "pool_step", "source", "target"])
                 for pool_step, assignment in enumerate(pool_assignments):
                     samples_seen = 0
-                    for sample, node in (torch.logical_and(masks[pool_step], assignment == concept)).nonzero():
+                    # [num_nodes_with_concept_total, 2] with all pairs of (batch_index, node_index) of nodes that are
+                    # not masked and are classified to a certain example
+                    example_nodes = (torch.logical_and(masks[pool_step], assignment == concept)).nonzero()
+                    for sample, node in example_nodes[torch.randperm(example_nodes.shape[0]), :]:
                         if samples_seen >= SAMPLES_PER_CONCEPT:
                             break
                         edge_index_prev, _, _ = adj_to_edge_index(adjs[pool_step][sample])
