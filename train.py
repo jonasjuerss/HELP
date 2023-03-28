@@ -26,6 +26,7 @@ from custom_logger import log
 from custom_net import CustomNet
 from data_generation.custom_dataset import UniqueMotifCategorizationDataset, CustomDataset, \
     UniqueMultipleOccurrencesMotifCategorizationDataset
+from data_generation.dataset_wrappers import DatasetWrapper, CustomDatasetWrapper, TUDatasetWrapper, EnzymesWrapper
 from data_generation.deserializer import from_dict
 from data_generation.motifs import BinaryTreeMotif, HouseMotif, FullyConnectedMotif
 
@@ -134,6 +135,8 @@ current_dataset = UniqueMultipleOccurrencesMotifCategorizationDataset(BinaryTree
                                                                        FullyConnectedMotif(5, [1], num_colors)],
                                                                       [[0.25, 0.25, 0.25, 0.25], [0.25, 0.25, 0.25, 0.25]])
                                                                         # [[0.4, 0.6], [0.4, 0.6]])#
+current_dataset_wrapper = CustomDatasetWrapper(current_dataset)
+current_dataset_wrapper = EnzymesWrapper()
 def parse_json_str(s: str):
     if len(s) >= 2 and s[0] == s[-1] and s[0] in ["\"", "'"]:
         s = s[1:-2] # remove possible quotation marks around whole json
@@ -182,17 +185,15 @@ if __name__ == "__main__":
     parser.add_argument('--pooling_type', type=str, default="Perturbed", choices=poolblocks.poolblock.valid_names(),
                         help='The type of pooling to use.')
 
-    parser.add_argument('--dataset', type=parse_json_str, default=current_dataset.__dict__(),
+    parser.add_argument('--dataset', type=parse_json_str, default=current_dataset_wrapper.__dict__(),
                         help="A json that defines the current dataset")
     parser.add_argument('--min_nodes', type=int, default=0,
                         help='Minimum number of nodes for a graph in the dataset. All other graphs are discarded. '
                              'Required e.g. to guarantee that ASAPooling always outputs a fixed number of nodes when '
                              'num_output_nodes is set.')
 
-    parser.add_argument('--train_set_size', type=int, default=512,
-                        help='Number of samples for the training set.')
-    parser.add_argument('--test_set_size', type=int, default=128,
-                        help='Number of samples for the training set.')
+    parser.add_argument('--train_split', type=float, default=0.8,
+                        help='Fraction of samples used for the train set.')
 
     parser.add_argument('--graph_log_freq', type=int, default=50,
                         help='Every how many epochs to log graphs to wandb. The final predictions will always be '
@@ -245,23 +246,12 @@ if __name__ == "__main__":
     custom_logger.device = device
     torch.manual_seed(args.seed)
 
-    dataset = typing.cast(CustomDataset, from_dict(args.dataset))
+    dataset_wrapper = typing.cast(DatasetWrapper, from_dict(args.dataset))
+    dataset = dataset_wrapper.get_dataset(args.dense_data, args.min_nodes)
+    num_train_samples = int(args.train_split * len(dataset))
+    train_data = dataset[:num_train_samples]
+    test_data = dataset[num_train_samples:]
 
-    CONV_TYPES = DENSE_CONV_TYPES if args.dense_data else SPARSE_CONV_TYPES
-    conv_type = next((x for x in CONV_TYPES if x.__name__ == args.conv_type), None)
-    if conv_type is None:
-        raise ValueError(f"No convolution type named \"{args.conv_type}\" found for dense_data={args.dense_data}!")
-    output_layer = output_layers.from_name(args.output_layer)
-    gnn_activation = getattr(torch.nn.functional, args.gnn_activation)
-    model = CustomNet(dataset.num_node_features, dataset.num_classes, args=args, device=device,
-                      output_layer_type=output_layer,
-                      pooling_block_type=poolblocks.poolblock.from_name(args.pooling_type, args.dense_data),
-                      conv_type=conv_type, activation_function=gnn_activation).to(device)
-
-    def condition(d):
-        return d.num_nodes >= args.min_nodes
-    train_data = [dataset.sample(dense=args.dense_data, condition=condition) for d in range(args.train_set_size)]
-    test_data = [dataset.sample(dense=args.dense_data, condition=condition) for d in range(args.test_set_size)]
     if args.dense_data:
         train_loader = DenseDataLoader(train_data, batch_size=args.batch_size, shuffle=True)
         test_loader = DenseDataLoader(test_data, batch_size=args.batch_size, shuffle=True)
@@ -276,6 +266,17 @@ if __name__ == "__main__":
     for graphs_to_log in log_graph_loader:
         pass
 
+    CONV_TYPES = DENSE_CONV_TYPES if args.dense_data else SPARSE_CONV_TYPES
+    conv_type = next((x for x in CONV_TYPES if x.__name__ == args.conv_type), None)
+    if conv_type is None:
+        raise ValueError(f"No convolution type named \"{args.conv_type}\" found for dense_data={args.dense_data}!")
+    output_layer = output_layers.from_name(args.output_layer)
+    gnn_activation = getattr(torch.nn.functional, args.gnn_activation)
+    model = CustomNet(dataset_wrapper.num_node_features, dataset_wrapper.num_classes, args=args, device=device,
+                      output_layer_type=output_layer,
+                      pooling_block_type=poolblocks.poolblock.from_name(args.pooling_type, args.dense_data),
+                      conv_type=conv_type, activation_function=gnn_activation).to(device)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
 
     for epoch in tqdm(range(args.num_epochs)):
@@ -284,12 +285,12 @@ if __name__ == "__main__":
             model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, args.graphs_to_log, epoch)
             # log_embeddings(model, train_loader, args.dense_data, epoch, args.save_path)
         if epoch % args.formula_log_freq == 0:
-            log_formulas(model, train_loader, test_loader, dataset.class_names, epoch)
+            log_formulas(model, train_loader, test_loader, dataset_wrapper.class_names, epoch)
         train_test_epoch(False, model, optimizer, test_loader, epoch, args.pooling_loss_weight, args.dense_data)
         model.end_epoch()
 
     if args.graph_log_freq >= 0:
         model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, args.graphs_to_log, epoch)
     if args.formula_log_freq >= 0:
-        log_formulas(model, train_loader, test_loader, dataset.class_names, epoch)
+        log_formulas(model, train_loader, test_loader, dataset_wrapper.class_names, epoch)
 
