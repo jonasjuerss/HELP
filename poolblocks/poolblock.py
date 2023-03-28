@@ -1,3 +1,4 @@
+from __future__ import annotations
 import abc
 import typing
 from functools import partial
@@ -19,7 +20,16 @@ from custom_logger import log
 from graphutils import adj_to_edge_index
 from poolblocks.custom_asap import ASAPooling
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from custom_net import CustomNet
 
+def rgb2hex(r: int, g: int, b: int):
+    return f'#{r:02x}{g:02x}{b:02x}'
+
+def rgb2hex_tensor(ten: torch.Tensor):
+    ten = torch.round(ten).to(int)
+    return rgb2hex(ten[0].item(), ten[1].item(), ten[2].item())
 class PoolBlock(torch.nn.Module, abc.ABC):
     def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
                  activation_function=F.relu, forced_embeddings=None, **kwargs):
@@ -48,7 +58,7 @@ class PoolBlock(torch.nn.Module, abc.ABC):
         """
         pass
 
-    def log_assignments(self, model: 'CustomNet', data: Data, num_graphs_to_log: int, epoch: int):
+    def log_assignments(self, model: CustomNet, data: Data, num_graphs_to_log: int, epoch: int):
         pass
 
     def end_epoch(self):
@@ -118,13 +128,13 @@ class DiffPoolBlock(PoolBlock):
         mask = None
         return new_embeddings, new_adj, None, loss_l + loss_e, pool, embedding, mask
 
-    def log_assignments(self, model: 'CustomNet', data: Data, num_graphs_to_log: int, epoch: int):
+    def log_assignments(self, model: CustomNet, data: Data, num_graphs_to_log: int, epoch: int):
         node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "label", "activations"])
         edge_table = wandb.Table(["graph", "pool_step", "source", "target"])
         device = self.embedding_convs[0].bias.device
         with torch.no_grad():
             data = data.clone().detach().to(device)
-            out, concepts, _, pool_assignments, pool_activations, _, _ = model(data)
+            out, concepts, _, pool_assignments, pool_activations, _, _, _ = model(data, collect_info=True)
             for graph_i in range(num_graphs_to_log):
 
                 for pool_step, assignment in enumerate(pool_assignments[:1]):
@@ -208,7 +218,7 @@ class ASAPBlock(PoolBlock):
                                                                                     edge_weight=edge_weights)
         return new_x, edge_index, new_edge_weight, 0, (perm, fitness, score), x, batch
 
-    def log_assignments(self, model: 'CustomNet', graphs: typing.List[Data], epoch: int):
+    def log_assignments(self, model: CustomNet, graphs: typing.List[Data], epoch: int):
         node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "border_strength", "border_color",
                                   "label", "activations"])
         edge_table = wandb.Table(["graph", "pool_step", "source", "target", "strength"])  # , "label", "strength"
@@ -423,7 +433,7 @@ class SingleMCBlock(PoolBlock):
     """
     def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
                  activation_function=F.relu, forced_embeddings=None, num_concepts: int = None,
-                 global_clusters: bool = True, **kwargs):
+                 global_clusters: bool = True, soft_sampling: bool = False, **kwargs):
         super().__init__(embedding_sizes, conv_type, activation_function, forced_embeddings, **kwargs)
         self.embedding_convs = torch.nn.ModuleList([conv_type(embedding_sizes[i], embedding_sizes[i + 1])
                                                     for i in range(len(embedding_sizes) - 1)])
@@ -440,6 +450,7 @@ class SingleMCBlock(PoolBlock):
         # In the first epoch, we haven't seen the data yet, so we always need to use local clusters. After that,
         # use_global_clusters will be equal to global_clusters
         self.use_global_clusters = False
+        self.soft_sampling = soft_sampling
         self.num_concepts = num_concepts
         self.cluster_colors = torch.tensor([
             [22, 160, 133],
@@ -489,44 +500,59 @@ class SingleMCBlock(PoolBlock):
         mask_new = torch.arange(x_new.shape[-2], device=custom_logger.device)[None, :] < num_clusters[:, None]
         return x_new, adj_new, None, 0, concept_assignments, x, mask_new
 
-    def log_assignments(self, model: 'CustomNet', data: Data, num_graphs_to_log: int, epoch: int):
+    def log_assignments(self, model: CustomNet, data: Data, num_graphs_to_log: int, epoch: int):
         # TODO adjust visualizations for other graphs to new signature
         # IMPORTANT: Here it is crucial to have batches of the size used during training in the forward pass
         # if using only a single example, some concepts might not be present but we still enforce the same number of
         # clusters
-        node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "label", "activations"])
+        node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "border_color", "label", "activations"])
         edge_table = wandb.Table(["graph", "pool_step", "source", "target"])
         device = custom_logger.device
         with torch.no_grad():
             data = data.clone().detach().to(device)
             # concepts: [batch_size, max_num_nodes_final_layer, embedding_dim_out_final_layer] the node embeddings of the final graph
             # pool_assignments: []
-            out, concepts, _, pool_assignments, pool_activations, adjs, masks = model(data)
+            out, concepts, _, pool_assignments, pool_activations, adjs, masks, input_embeddings =\
+                model(data, collect_info=True)
             masks = [data.mask] + masks
             adjs = [data.adj] + adjs
+            input_embeddings = [data.x] + input_embeddings
+            centroids = [torch.eye(data.x.shape[-1], device=custom_logger.device)] + \
+                        [pb.kmeans.centroids for pb in model.graph_network.pool_blocks]
 
             ############################## Log Graphs ##############################
 
             for graph_i in range(num_graphs_to_log):
                 for pool_step, assignment in enumerate(pool_assignments):
+                    # Calculate concept assignment colors
                     # [num_nodes] (with batch dimension and masked nodes removed)
                     assignment = assignment[graph_i][masks[pool_step][graph_i]].detach().cpu()
-
                     if self.cluster_colors.shape[0] <= torch.max(assignment):
                         raise ValueError(
                             f"Only {self.cluster_colors.shape[0]} colors given to distinguish {torch.max(assignment)} "
                             f"clusters!")
-
                     # [num_nodes, 3] (intermediate dimensions: num_nodes x num_clusters x 3)
-                    colors = self.cluster_colors[assignment, :]
+                    concept_colors = self.cluster_colors[assignment, :]
+
+                    # Calculate feature colors
+                    # [num_nodes_in_neighbourhood, num_concepts] where (i, j) gives difference between node i and concept j
+                    feature_colors = torch.cdist(input_embeddings[pool_step][graph_i, masks[pool_step][graph_i]],
+                                                 centroids[pool_step])
+                    if feature_colors.shape[1] > self.cluster_colors.shape[0]:
+                        raise ValueError(f"Cannot visualize {feature_colors.shape[1]} using "
+                                         f"{self.cluster_colors.shape[0]} colors!")
+                    feature_colors = torch.sum(torch.softmax(feature_colors, dim=1)[:, :, None].cpu() *
+                                               self.cluster_colors[None, :feature_colors.shape[1], :], dim=1)
+                    feature_colors = torch.round(feature_colors).to(int)
+
                     for i, i_old in enumerate(masks[pool_step][graph_i].nonzero().squeeze(1)):
-                        node_table.add_data(graph_i, pool_step, i, colors[i, 0].item(),
-                                            colors[i, 1].item(), colors[i, 2].item(),
+                        node_table.add_data(graph_i, pool_step, i, feature_colors[i, 0].item(),
+                                            feature_colors[i, 1].item(), feature_colors[i, 2].item(),
+                                            rgb2hex_tensor(concept_colors[i, :]),
                                             f"Cluster {assignment[i]}",
                                             ", ".join([f"{m.item():.2f}" for m in
                                                        pool_activations[pool_step][graph_i, i_old, :].cpu()]))
 
-                    # [3, num_edges] where the first row seems to be constant 0, indicating the graph membership
                     edge_index, _, _ = adj_to_edge_index(adjs[pool_step][graph_i:graph_i+1, :, :],
                                                          masks[pool_step][graph_i:graph_i+1])
                     for i in range(edge_index.shape[1]):
@@ -536,6 +562,7 @@ class SingleMCBlock(PoolBlock):
                 node_table=node_table,
                 edge_table=edge_table
             ), step=epoch)
+
             ############################## Log Concept Examples ##############################
             SAMPLES_PER_CONCEPT = 3
             # This is not ideal as we only sample concepts from the same (first) batch. But we could increase it's size
@@ -555,9 +582,21 @@ class SingleMCBlock(PoolBlock):
                         edge_index_prev, _, _ = adj_to_edge_index(adjs[pool_step][sample])
                         subset, edge_index, _, _ = k_hop_subgraph(node.item(), len(self.embedding_convs), edge_index_prev,
                                                                   relabel_nodes=True)
+
+                        # [num_nodes_in_neighbourhood, num_concepts] where (i, j) gives difference between node i and concept j
+                        feature_colors = torch.cdist(input_embeddings[pool_step][sample, masks[pool_step][sample]][subset],
+                                                     centroids[pool_step])
+                        if feature_colors.shape[1] > self.cluster_colors.shape[0]:
+                            raise ValueError(f"Cannot visualize {feature_colors.shape[1]} using "
+                                             f"{self.cluster_colors.shape[0]} colors!")
+                        feature_colors = torch.sum(torch.softmax(feature_colors, dim=1)[:, :, None].cpu() *
+                                                   self.cluster_colors[None, :feature_colors.shape[1], :], dim=1)
+                        feature_colors = torch.round(feature_colors).to(int)
+
                         for i in range(subset.shape[0]):
-                            node_table.add_data(samples_seen, pool_step, i, 0, 0, 0,
-                                                "#F00" if subset[i] == node.item() else "#000",
+                            node_table.add_data(samples_seen, pool_step, i, feature_colors[i, 0].item(),
+                                                feature_colors[i, 1].item(), feature_colors[i, 2].item(),
+                                                "#F00" if subset[i] == node.item() else "#FFF",
                                                 f"", "")
                         for i in range(edge_index.shape[1]):
                             edge_table.add_data(samples_seen, pool_step, edge_index[0, i].item(), edge_index[1, i].item())

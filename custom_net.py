@@ -107,7 +107,7 @@ class CustomNet(torch.nn.Module, abc.ABC):
         """
         self.output_layer.log_custom_losses(mode, epoch, dataset_length)
 
-    def forward(self, data: Data):
+    def forward(self, data: Data, collect_info: bool = False):
         """
 
         :param data:
@@ -133,10 +133,14 @@ class CustomNet(torch.nn.Module, abc.ABC):
             print("Multiple batch dimensions currently might not work as expected!")
 
         concepts, pooling_loss, pooling_assignments, pooling_activations, batch_or_mask, adjs_or_edge_indices,\
-            all_batch_or_mask = self.graph_network(data)
+            all_batch_or_mask, input_embeddings = self.graph_network(data, collect_info=collect_info)
         x = self.output_layer(self.merge_layer(input=concepts, batch_or_mask=batch_or_mask))
-        return F.log_softmax(x, dim=1), concepts, pooling_loss, pooling_assignments, pooling_activations,\
-            adjs_or_edge_indices, all_batch_or_mask
+        if collect_info:
+            return F.log_softmax(x, dim=1), concepts, pooling_loss, pooling_assignments, pooling_activations, \
+                adjs_or_edge_indices, all_batch_or_mask, input_embeddings
+        else:
+            return F.log_softmax(x, dim=1), concepts, pooling_loss
+
 
     def explain(self, train_loader: DataLoader, test_loader: DataLoader, class_names: List[str]):
         return self.output_layer.explain(self.graph_network, train_loader, test_loader, class_names)
