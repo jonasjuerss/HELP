@@ -79,13 +79,57 @@ class SparseGraph:
             if not torch.any(torch.all(self.edge_index == edge_index[:, i:i+1], dim=0)):
                 self.edge_index = torch.cat((self.edge_index, edge_index[:, i:i+1]), dim=1)
 
+    def replace_node_with_graph(self, node_index: int, graph: SparseGraph) -> None:
+        """
+        Replaces the node at the given index with the given graph. In particular the features of the given node
+        are overwritten with the features of the first node in the given graph and all other nodes are appended along
+        with an appropriate edge_index
+
+        :param node_index: Index of the node to replace with the graph
+        :param graph: graph to replace the node with
+        """
+        if graph.num_features != self.num_features:
+            raise ValueError(f"Expected same number of features for current graph ({self.num_features}) and attached "
+                             f"graph ({graph.num_features})!")
+
+        num_edges_prev = self.num_edges
+        self.edge_index = torch.cat((self.edge_index, graph.edge_index), dim=1)
+        self.edge_index[:, num_edges_prev:][self.edge_index[:, num_edges_prev:] != 0] += self.num_nodes() - 1
+        self.edge_index[:, num_edges_prev:][self.edge_index[:, num_edges_prev:] == 0] = node_index
+
+        self.x[node_index, :] = graph.x[0, :]
+        self.x = torch.cat((self.x, graph.x[1:, :]), dim=0)
+        if self.annotations is not None:
+            self.annotations[node_index] = graph.annotations[0]
+            self.annotations = torch.cat((self.annotations, graph.annotations[1:]), dim=0)
+
+    def perturb(self, prob: float) -> None:
+        """
+        Adds roughly num_edges ~ Bernoulli(num_nodes, prob) random undirected edges to the graph
+        """
+        num_added_edges = int(torch.distributions.binomial.Binomial(self.num_nodes(),
+                                                                    torch.tensor(prob)).sample().item())
+        edge_index = torch.randint(0, self.num_nodes(), (2, num_added_edges))
+        edge_index = torch.cat((edge_index, edge_index[[1, 0], :]), dim=1)
+        # Edge index may contain duplicates but we deal with this in
+        self.add_edges_if_not_exist_edge_index(edge_index)
     def num_nodes(self):
         return self.x.shape[0]
 
-    def render(self):
+    @property
+    def num_features(self):
+        return self.x.shape[1]
+
+    @property
+    def num_edges(self):
+        return self.edge_index.shape[1]
+
+    def render(self, filename=None):
         data = Data(x=self.x, edge_index=self.edge_index)
-        g = torch_geometric.utils.to_networkx(data, to_undirected=True)
+        g = torch_geometric.utils.to_networkx(data, to_undirected=False)
         nx.draw(g, with_labels=True)
+        if filename is not None:
+            plt.savefig(filename)
         plt.show()
 
 
@@ -144,23 +188,6 @@ class HouseMotif(Motif):
         return SparseGraph(x, to_undirected(edge_index), annotations)
 
 
-# class TriangleMotif(Motif):
-# CONTAINED IN FULLY CONNECTED
-#     def __init__(self, colors: List[int], num_colors: int):
-#         super().__init__(num_colors, 3, dict(colors=colors, num_colors=num_colors))
-#         self.colors = colors
-#
-#     def sample(self) -> SparseGraph:
-#         #   0
-#         #  / \
-#         # 1---2
-#         color = _random_list_entry(self.colors)
-#         x = torch.zeros((3, self.num_colors))
-#         x[:, color] = 1
-#         edge_index = torch.tensor([[0, 1], [0, 2], [1, 2]], dtype=torch.long).T
-#         return SparseGraph(x, to_undirected(edge_index))
-
-
 class FullyConnectedMotif(Motif):
     def __init__(self, num_nodes: int, colors: List[int], num_colors: int, annotation: int = 0):
         super().__init__(num_colors, num_nodes, dict(num_nodes=num_nodes, colors=colors, num_colors=num_colors,
@@ -189,7 +216,29 @@ class FullyConnectedMotif(Motif):
             return "FCPentagon"
         elif self.num_nodes == 6:
             return "FCHexagon"
+        else:
+            return f"FullyConnected ({self.num_nodes})"
 
+class CircleMotif(Motif):
+    def __init__(self, num_nodes: int, colors: List[int], num_colors: int, annotation: int = 0):
+        super().__init__(num_colors, num_nodes, dict(num_nodes=num_nodes, colors=colors, num_colors=num_colors,
+                                                     annotation=annotation))
+        self.colors = colors
+        self.num_nodes = num_nodes
+        self.annotation = annotation
+
+    def sample(self) -> SparseGraph:
+        color = _random_list_entry(self.colors)
+        x = torch.zeros((self.num_nodes, self.num_colors))
+        x[:, color] = 1
+        node_range = torch.arange(self.num_nodes)
+        edge_index = torch.stack((node_range, torch.remainder(node_range + 1, self.num_nodes)), dim=0)
+        edge_index = torch.cat((edge_index, torch.flip(edge_index, dims=(0, ))), dim=1)
+        return SparseGraph(x, edge_index, torch.ones(x.shape[0], dtype=torch.long) * self.annotation)
+
+    @property
+    def name(self):
+        return f"Circle ({self.num_nodes})"
 
 class BinaryTreeMotif(Motif):
     def __init__(self, max_depth: int, colors: List[int], num_colors: int, random: bool = True, annotation: int = 0):

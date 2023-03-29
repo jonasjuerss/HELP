@@ -25,10 +25,10 @@ import poolblocks.poolblock
 from custom_logger import log
 from custom_net import CustomNet
 from data_generation.custom_dataset import UniqueMotifCategorizationDataset, CustomDataset, \
-    UniqueMultipleOccurrencesMotifCategorizationDataset
+    UniqueMultipleOccurrencesMotifCategorizationDataset, UniqueHierarchicalMotifDataset
 from data_generation.dataset_wrappers import DatasetWrapper, CustomDatasetWrapper, TUDatasetWrapper, EnzymesWrapper
 from data_generation.deserializer import from_dict
-from data_generation.motifs import BinaryTreeMotif, HouseMotif, FullyConnectedMotif
+from data_generation.motifs import BinaryTreeMotif, HouseMotif, FullyConnectedMotif, CircleMotif
 
 DENSE_CONV_TYPES = [DenseGCNConv]
 SPARSE_CONV_TYPES = [GCNConv]
@@ -135,8 +135,20 @@ current_dataset = UniqueMultipleOccurrencesMotifCategorizationDataset(BinaryTree
                                                                        FullyConnectedMotif(5, [1], num_colors)],
                                                                       [[0.25, 0.25, 0.25, 0.25], [0.25, 0.25, 0.25, 0.25]])
                                                                         # [[0.4, 0.6], [0.4, 0.6]])#
+
+# Note that the colors (and number of colors) here are dummy and will be replaced by the dataset
+current_dataset = UniqueHierarchicalMotifDataset([HouseMotif([0], [0], 1),
+                                                  FullyConnectedMotif(4, [0], 1),
+                                                  CircleMotif(5, [0], 1)],
+                                                 [HouseMotif([0], [0], 1),
+                                                  FullyConnectedMotif(5, [0], 1),
+                                                  FullyConnectedMotif(3, [0], 1)],
+                                                 [1/3, 1/3, 1/3],
+                                                 [1/3, 1/3, 1/3],
+                                                 0.0)
+
 current_dataset_wrapper = CustomDatasetWrapper(current_dataset)
-current_dataset_wrapper = EnzymesWrapper()
+# current_dataset_wrapper = EnzymesWrapper()
 def parse_json_str(s: str):
     if len(s) >= 2 and s[0] == s[-1] and s[0] in ["\"", "'"]:
         s = s[1:-2] # remove possible quotation marks around whole json

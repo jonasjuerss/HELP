@@ -2,10 +2,11 @@ import data_generation.motifs as motifs
 import data_generation.custom_dataset as custom_dataset
 from data_generation import dataset_wrappers
 
-__all__ = [motifs.HouseMotif, motifs.FullyConnectedMotif, motifs.BinaryTreeMotif,
+__all__ = [motifs.HouseMotif, motifs.FullyConnectedMotif, motifs.BinaryTreeMotif, motifs.CircleMotif,
 
            custom_dataset.UniqueMotifCategorizationDataset,
            custom_dataset.UniqueMultipleOccurrencesMotifCategorizationDataset,
+           custom_dataset.UniqueHierarchicalMotifDataset,
 
            dataset_wrappers.CustomDatasetWrapper,
            dataset_wrappers.TUDatasetWrapper,

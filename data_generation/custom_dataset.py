@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import abstractmethod
+from math import comb
 from typing import List, Tuple, Callable
 
 import torch
@@ -172,10 +173,10 @@ class CustomDatasetGraphTemplate(seri.ArgSerializable):
         :param possible_motifs: other motifs to attach to it
         :param perturb: There will be binom(num_nodes, perturb) random edges added (so expected value is num_nodes * perturb)
         """
-        super().__init__(dict(base_motif=base_motif, possible_motifs=possible_motifs))
+        super().__init__(dict(base_motif=base_motif, possible_motifs=possible_motifs, perturb=perturb))
         self.base_motif = base_motif
         self.possible_motifs = possible_motifs
-        self.perturb = torch.tensor(perturb)
+        self.perturb = perturb
 
     def sample(self, motif_counts: List[int]) -> SparseGraph:
         if len(motif_counts) != len(self.possible_motifs):
@@ -190,15 +191,96 @@ class CustomDatasetGraphTemplate(seri.ArgSerializable):
                 num_nodes_prev = graph.num_nodes()
                 graph = graph.merged_with(motif.sample())
                 graph.add_edges([[connect_loc, num_nodes_prev], [num_nodes_prev, connect_loc]])
-        num_added_edges = int(torch.distributions.binomial.Binomial(graph.num_nodes(), self.perturb).sample().item())
-        edge_index = torch.randint(0, graph.num_nodes(), (2, num_added_edges))
-        edge_index = torch.cat((edge_index, edge_index[[1, 0], :]), dim=1)
-        # Edge index may contain duplicates but we deal with this in
-        graph.add_edges_if_not_exist_edge_index(edge_index)
+        graph.perturb(self.perturb)
         return graph
 
-# class HierarchicalMotifDataset(CustomDataset):
-#     def __init__(self, highlevel_motifs: List[Motif], lowlevel_motifs: List[Motif], motif_probs: List[float], perturb: float = 0.0):
-#         super().__init__(max_nodes, num_classes, num_node_features, class_names, args)
-#     def _sample(self) -> Data:
-#         pass
+class HierarchicalMotifGraphTemplate(seri.ArgSerializable):
+    def __init__(self, highlevel_motifs: List[Motif], lowlevel_motifs: List[Motif], highlevel_motif_probs: List[float],
+                 lowlevel_motif_probs: List[float], perturb: float):
+        """
+        A generator for graphs consisting of a high-level motif where each node itself is a low-level motif
+        :param perturb: There will be binom(num_nodes, perturb) random edges added (so expected value is num_nodes * perturb)
+        """
+        super().__init__(dict(highlevel_motifs=highlevel_motifs, lowlevel_motifs=lowlevel_motifs,
+                              highlevel_motif_probs=highlevel_motif_probs, lowlevel_motif_probs=lowlevel_motif_probs,
+                              perturb=perturb))
+        self.highlevel_motifs = highlevel_motifs
+        self.lowlevel_motifs = lowlevel_motifs
+        self.highlevel_motif_probs = highlevel_motif_probs
+        self.lowlevel_motif_probs = lowlevel_motif_probs
+        self.perturb = perturb
+        self.num_colors = max([m.max_nodes for m in highlevel_motifs])
+        if len(highlevel_motifs) != len(highlevel_motif_probs):
+            raise ValueError(f"Expected number of possible high level motifs ({len(highlevel_motifs)}) to be the same as "
+                             f"the number of high level probabilities ({len(highlevel_motif_probs)})")
+        if len(lowlevel_motifs) != len(lowlevel_motif_probs):
+            raise ValueError(f"Expected number of possible low level motifs ({len(lowlevel_motifs)}) to be the same as "
+                             f"the number of low level probabilities ({len(lowlevel_motif_probs)})")
+
+    def sample(self, highlevel_index: int, lowlevel_assignments: List[int]) -> SparseGraph:
+        graph = self.highlevel_motifs[highlevel_index].sample()
+        graph.x = torch.empty(graph.num_nodes(), self.num_colors)
+
+        if graph.num_nodes() != len(lowlevel_assignments):
+            raise ValueError(f"Expected sampled high level motif to have exactly as many nodes "
+                             f"({graph.num_nodes()}) as low level assignments given "
+                             f"({len(lowlevel_assignments)})!")
+
+        for i, lowlevel in enumerate(lowlevel_assignments):
+            low_graph = self.lowlevel_motifs[lowlevel].sample()
+            low_graph.x = torch.zeros(low_graph.num_nodes(), self.num_colors)
+            low_graph.x[:, i] = 1
+            graph.replace_node_with_graph(i, low_graph)
+        graph.perturb(self.perturb)
+        return graph
+class UniqueHierarchicalMotifDataset(CustomDataset):
+    """
+    Samples a highlevel graph consisting of one motif per low-level node. Colors of lowlevel motifs will be overwritten
+    with the index of the high-level node.
+    For simplicity, classes are given as class * num_lowlevel_motifs + sum(2 ** present_lowlevel_motifs - 1). Note that this
+    yields some empty classes if there are highlevel motifs with less nodes than the total number of lowlevel motifs
+    """
+    def __init__(self, highlevel_motifs: List[Motif], lowlevel_motifs: List[Motif], highlevel_motif_probs: List[float],
+                 lowlevel_motif_probs: List[float], perturb: float = 0.0):
+        """
+
+        :param highlevel_motifs:
+        :param lowlevel_motifs: It is assumed that each lowlevel motif has exactly motif.max_num_nodes nodes for any sample
+        :param highlevel_motif_probs:
+        :param lowlevel_motif_probs:
+        :param perturb:
+        """
+
+        # Note: here we use sum(2 ** index), so lower indices will yield lower numbers and we don't need to reverse
+        low_class_names = [""]
+        for m in lowlevel_motifs:
+            low_class_names += [prev + ("" if prev == "" else "+") + m.name for prev in low_class_names]
+        low_class_names = low_class_names[1:] # At least one lowlevel motif has to be present
+        class_names = []
+        for m in highlevel_motifs:
+            class_names += [f"{m.name}:{low}" for low in low_class_names]
+        max_nodes_in_highlevel = max([m.max_nodes for m in highlevel_motifs])
+        self.classes_per_highlevel = 2 ** len(lowlevel_motifs) - 1  # -1 as at least one motif has to be present
+        super().__init__(max_nodes_in_highlevel * max([m.max_nodes for m in lowlevel_motifs]),
+                         len(highlevel_motifs) * self.classes_per_highlevel, max_nodes_in_highlevel, class_names,
+                         dict(highlevel_motifs=highlevel_motifs, lowlevel_motifs=lowlevel_motifs,
+                              highlevel_motif_probs=highlevel_motif_probs, lowlevel_motif_probs=lowlevel_motif_probs,
+                              perturb=perturb))
+        self.template = HierarchicalMotifGraphTemplate(highlevel_motifs, lowlevel_motifs, highlevel_motif_probs,
+                                                       lowlevel_motif_probs, perturb)
+        self.highlevel_motifs = highlevel_motifs
+        self.lowlevel_motifs = lowlevel_motifs
+        self.highlevel_distr = Categorical(torch.tensor(highlevel_motif_probs))
+        self.lowlevel_distr = Categorical(torch.tensor(lowlevel_motif_probs))
+        # classes_per_highlevel = [0] + [sum([comb(m.max_nodes, i)
+        #                                     for i in range(max(m.max_nodes, len(lowlevel_motifs)) + 1)])
+        #                                for m in highlevel_motifs]
+
+
+    def _sample(self) -> Data:
+        highlevel_index = self.highlevel_distr.sample().item()
+        lowlevel_indices = self.lowlevel_distr.sample((self.highlevel_motifs[highlevel_index].max_nodes, ))
+        graph = self.template.sample(highlevel_index, lowlevel_indices.tolist())
+        y = self.classes_per_highlevel * highlevel_index + torch.sum(2 ** torch.unique(lowlevel_indices)) - 1
+        return Data(x=graph.x, edge_index=graph.edge_index, y=torch.tensor([y]), num_nodes=graph.num_nodes(),
+                    annotations=graph.annotations)
