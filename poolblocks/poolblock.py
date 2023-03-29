@@ -585,20 +585,20 @@ class SingleMCBlock(PoolBlock):
                                                                   relabel_nodes=True)
 
                         # [num_nodes_in_neighbourhood, num_concepts] where (i, j) gives difference between node i and concept j
-                        feature_colors = torch.cdist(input_embeddings[pool_step][sample, masks[pool_step][sample]][subset],
-                                                     centroids[pool_step])
-                        if feature_colors.shape[1] > self.cluster_colors.shape[0]:
-                            raise ValueError(f"Cannot visualize {feature_colors.shape[1]} using "
+                        distances = torch.cdist(input_embeddings[pool_step][sample, masks[pool_step][sample]][subset],
+                                                centroids[pool_step])
+                        if distances.shape[1] > self.cluster_colors.shape[0]:
+                            raise ValueError(f"Cannot visualize {distances.shape[1]} using "
                                              f"{self.cluster_colors.shape[0]} colors!")
-                        feature_colors = torch.sum(torch.softmax(feature_colors / TEMPERATURE, dim=1)[:, :, None].cpu() *
-                                                   self.cluster_colors[None, :feature_colors.shape[1], :], dim=1)
+                        feature_colors = torch.sum(torch.softmax(distances / TEMPERATURE, dim=1)[:, :, None].cpu() *
+                                                   self.cluster_colors[None, :distances.shape[1], :], dim=1)
                         feature_colors = torch.round(feature_colors).to(int)
 
                         for i in range(subset.shape[0]):
                             node_table.add_data(samples_seen, pool_step, i, feature_colors[i, 0].item(),
                                                 feature_colors[i, 1].item(), feature_colors[i, 2].item(),
                                                 "#F00" if subset[i] == node.item() else "#FFF",
-                                                "Distances", "")
+                                                "Distances: " + ", ".join([f"{m.item():.2f}" for m in distances[i, :].cpu()]), "")
                         for i in range(edge_index.shape[1]):
                             edge_table.add_data(samples_seen, pool_step, edge_index[0, i].item(), edge_index[1, i].item())
                         samples_seen += 1
