@@ -581,8 +581,10 @@ class SingleMCBlock(PoolBlock):
                         if samples_seen >= SAMPLES_PER_CONCEPT:
                             break
                         edge_index_prev, _, _ = adj_to_edge_index(adjs[pool_step][sample])
-                        subset, edge_index, _, _ = k_hop_subgraph(node.item(), len(self.embedding_convs), edge_index_prev,
-                                                                  relabel_nodes=True)
+                        subset, edge_index, _, _ = k_hop_subgraph(node.item(), len(self.embedding_convs),
+                                                                  edge_index_prev,
+                                                                  relabel_nodes=True,
+                                                                  num_nodes=torch.sum(masks[pool_step][sample]).item())
 
                         # [num_nodes_in_neighbourhood, num_concepts] where (i, j) gives difference between node i and concept j
                         distances = torch.cdist(input_embeddings[pool_step][sample, masks[pool_step][sample]][subset],

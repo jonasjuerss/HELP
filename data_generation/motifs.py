@@ -52,7 +52,7 @@ class SparseGraph:
             raise ValueError(f"Expected feature vector to be of dimension 1 or 2 but got {len(features.shape)}!")
 
         if features.shape[1] == self.x.shape[1]:
-            self.x = torch.cat((self.x, features), dim=1)
+            self.x = torch.cat((self.x, features), dim=0)
             if self.annotations is not None:
                 self.annotations = torch.cat((self.annotations, annotations), dim=1)
         else:
@@ -103,6 +103,25 @@ class SparseGraph:
             self.annotations[node_index] = graph.annotations[0]
             self.annotations = torch.cat((self.annotations, graph.annotations[1:]), dim=0)
 
+
+    def remove_edge(self, from_node: int, to_node: int) -> bool:
+        mask = torch.any(self.edge_index != torch.tensor([[from_node], [to_node]]), dim=0)
+        self.edge_index = self.edge_index[:, mask]
+        return not torch.all(mask)
+    def insert_node_on_edge(self, from_node: int, to_node: int, features: torch.Tensor, directed=False,
+                            annotation: Optional[Tensor] = None):
+        if not self.remove_edge(from_node, to_node) or (not directed and not self.remove_edge(to_node, from_node)):
+            raise ValueError(f"No {'' if directed else 'un'}directed edge between nodes {from_node} and {to_node} "
+                             f"found!")
+        added_edges = torch.tensor([[from_node, self.num_nodes()], [self.num_nodes(), to_node]]).T
+        if not directed:
+            added_edges = torch.cat((added_edges, torch.flip(added_edges, (0, ))), dim=1)
+        self.edge_index = torch.cat((self.edge_index, added_edges), dim=1)
+        self.add_nodes(features, annotation)
+
+    def expand_feature_dim(self, num_dims: int):
+        self.x = torch.cat((self.x, torch.zeros(self.x.shape[0], num_dims)), dim=1)
+
     def perturb(self, prob: float) -> None:
         """
         Adds roughly num_edges ~ Bernoulli(num_nodes, prob) random undirected edges to the graph
@@ -134,7 +153,7 @@ class SparseGraph:
 
 
 class Motif(cs.ArgSerializable):
-    def __init__(self, num_colors: int, max_nodes: int, args: dict):
+    def __init__(self, num_colors: int, max_nodes: int, max_edges: int, args: dict):
         """
         :param num_colors: The total number of colors in the graph
         :param max_nodes: the maximum number of nodes a sample of this motif can have
@@ -143,6 +162,7 @@ class Motif(cs.ArgSerializable):
         super().__init__(args)
         self.num_colors = num_colors
         self.max_nodes = max_nodes
+        self.max_edges = max_edges
 
     @abstractmethod
     def sample(self) -> SparseGraph:
@@ -155,8 +175,8 @@ class Motif(cs.ArgSerializable):
 
 class HouseMotif(Motif):
 
-    def __init__(self, roof_colors: List[int], basement_colors: List[int], num_colors: int, roof_annotation: int = 0,
-                 basement_annotation: int = 0):
+    def __init__(self, roof_colors: List[int], basement_colors: List[int], num_colors: int,
+                 roof_annotation: Optional[int] = None, basement_annotation: Optional[int] = None):
         """
           0
          / \
@@ -167,7 +187,7 @@ class HouseMotif(Motif):
         :param basement_colors: Possible colors for the two basement nodes (will be chosen uniformly at random on sample())
         :param num_colors: number of different colors in the overall graph
         """
-        super().__init__(num_colors, 5,
+        super().__init__(num_colors, 5, 2 * 6,
                          dict(roof_colors=roof_colors, basement_colors=basement_colors, num_colors=num_colors,
                               roof_annotation=roof_annotation, basement_annotation=basement_annotation))
         self.roof_colors = roof_colors
@@ -181,16 +201,19 @@ class HouseMotif(Motif):
         x = torch.zeros((5, self.num_colors))
         x[:3, roof_color] = 1
         x[3:, basement_color] = 1
-        annotations = torch.empty((5,), dtype=torch.long)
-        annotations[:3] = self.roof_annotation
-        annotations[3:] = self.basement_annotation
+        if self.roof_annotation and self.basement_annotation:
+            annotations = torch.empty((5,), dtype=torch.long)
+            annotations[:3] = self.roof_annotation
+            annotations[3:] = self.basement_annotation
+        else:
+            annotations = None
         edge_index = torch.tensor([[0, 1], [0, 2], [1, 2], [1, 3], [2, 4], [3, 4]], dtype=torch.long).T
         return SparseGraph(x, to_undirected(edge_index), annotations)
 
 
 class FullyConnectedMotif(Motif):
-    def __init__(self, num_nodes: int, colors: List[int], num_colors: int, annotation: int = 0):
-        super().__init__(num_colors, num_nodes, dict(num_nodes=num_nodes, colors=colors, num_colors=num_colors,
+    def __init__(self, num_nodes: int, colors: List[int], num_colors: int, annotation: Optional[int] = None):
+        super().__init__(num_colors, num_nodes, 2 * num_nodes * (num_nodes - 1) , dict(num_nodes=num_nodes, colors=colors, num_colors=num_colors,
                                                      annotation=annotation))
         self.colors = colors
         self.num_nodes = num_nodes
@@ -204,7 +227,8 @@ class FullyConnectedMotif(Motif):
         node_indices = torch.arange(self.num_nodes)
         adj[node_indices, node_indices] = 0
         edge_index, _, _ = adj_to_edge_index(adj)
-        return SparseGraph(x, edge_index, torch.ones(x.shape[0], dtype=torch.long) * self.annotation)
+        annotations = None if self.annotation is None else torch.ones(x.shape[0], dtype=torch.long) * self.annotation
+        return SparseGraph(x, edge_index, annotations)
 
     @property
     def name(self):
@@ -220,9 +244,10 @@ class FullyConnectedMotif(Motif):
             return f"FullyConnected ({self.num_nodes})"
 
 class CircleMotif(Motif):
-    def __init__(self, num_nodes: int, colors: List[int], num_colors: int, annotation: int = 0):
-        super().__init__(num_colors, num_nodes, dict(num_nodes=num_nodes, colors=colors, num_colors=num_colors,
-                                                     annotation=annotation))
+    def __init__(self, num_nodes: int, colors: List[int], num_colors: int, annotation: Optional[int] = None):
+        super().__init__(num_colors, num_nodes, 2 * num_nodes, dict(num_nodes=num_nodes, colors=colors,
+                                                                    num_colors=num_colors,
+                                                                    annotation=annotation))
         self.colors = colors
         self.num_nodes = num_nodes
         self.annotation = annotation
@@ -234,15 +259,17 @@ class CircleMotif(Motif):
         node_range = torch.arange(self.num_nodes)
         edge_index = torch.stack((node_range, torch.remainder(node_range + 1, self.num_nodes)), dim=0)
         edge_index = torch.cat((edge_index, torch.flip(edge_index, dims=(0, ))), dim=1)
-        return SparseGraph(x, edge_index, torch.ones(x.shape[0], dtype=torch.long) * self.annotation)
+        annotations = None if self.annotation is None else torch.ones(x.shape[0], dtype=torch.long) * self.annotation
+        return SparseGraph(x, edge_index, annotations)
 
     @property
     def name(self):
         return f"Circle ({self.num_nodes})"
 
 class BinaryTreeMotif(Motif):
-    def __init__(self, max_depth: int, colors: List[int], num_colors: int, random: bool = True, annotation: int = 0):
-        super().__init__(num_colors, (2 ** (max_depth + 1)) - 1,
+    def __init__(self, max_depth: int, colors: List[int], num_colors: int, random: bool = True,
+                 annotation: Optional[int] = None):
+        super().__init__(num_colors, (2 ** (max_depth + 1)) - 1, 2 * ((2 ** (max_depth + 1)) - 2),
                          dict(max_depth=max_depth, colors=colors, num_colors=num_colors, random=random))
         self.max_depth = max_depth
         self.colors = colors
@@ -255,7 +282,8 @@ class BinaryTreeMotif(Motif):
         """
         color = _random_list_entry(self.colors)
         tree = self._random_binary_tree(self.max_depth, color)
-        tree.annotations = torch.ones(tree.num_nodes(), dtype=torch.long) * self.annotation
+        if self.annotation is not None:
+            tree.annotations = torch.ones(tree.num_nodes(), dtype=torch.long) * self.annotation
         return tree
 
     def _random_binary_tree(self, max_depth: int, color: int) -> SparseGraph:
