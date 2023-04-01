@@ -456,12 +456,12 @@ class SingleMCBlock(PoolBlock):
             [22, 160, 133],
             [243, 156, 18],
             [142, 68, 173],
-            [39, 174, 96],
             [192, 57, 43],
             [44, 62, 80],
             [41, 128, 185],
             [39, 174, 96],
             [211, 84, 0],
+            [39, 174, 96],
             [121, 85, 72]], dtype=torch.float)
 
     def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None):
