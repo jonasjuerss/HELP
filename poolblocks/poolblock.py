@@ -518,7 +518,7 @@ class SingleMCBlock(PoolBlock):
             # https://ai.stackexchange.com/questions/13776/how-is-reinforce-used-instead-of-backpropagation
             # [num_nodes, num_concepts] (centroids: [num_concepts, embedding_size])
             assignment_probs = torch.cdist(x[mask], self.kmeans.centroids)
-            assignment_probs = torch.softmax(assignment_probs / self.soft_sampling, dim=-1)
+            assignment_probs = torch.nn.functional.softmin(assignment_probs / self.soft_sampling, dim=-1)
             distr = Categorical(assignment_probs)
             concept_assignments = distr.sample()
         # [batch, max_num_nodes] take only the embeddings of nodes that are not masked (otherwise we would
@@ -570,7 +570,7 @@ class SingleMCBlock(PoolBlock):
                 if temperature != 0:
                     distances = torch.cdist(input_embeddings[pool_step + 1][masks[pool_step + 1]],
                                             centroids[pool_step + 1])
-                    max_probs, _ = torch.max(torch.softmax(distances / temperature, dim=-1), dim=-1)
+                    max_probs, _ = torch.max(torch.nn.functional.softmin(distances / temperature, dim=-1), dim=-1)
                     print(f"Probability of most likely concept in pooling step {pool_step}: {100*torch.mean(max_probs):.2f}%"
                           f"+-{100*torch.std(max_probs):.2f}")
             ############################## Log Graphs ##############################
@@ -593,7 +593,7 @@ class SingleMCBlock(PoolBlock):
                     if feature_colors.shape[1] > self.cluster_colors.shape[0]:
                         raise ValueError(f"Cannot visualize {feature_colors.shape[1]} using "
                                          f"{self.cluster_colors.shape[0]} colors!")
-                    feature_colors = torch.sum(torch.softmax(feature_colors / TEMPERATURE, dim=1)[:, :, None].cpu() *
+                    feature_colors = torch.sum(torch.nn.functional.softmin(feature_colors / TEMPERATURE, dim=1)[:, :, None].cpu() *
                                                self.cluster_colors[None, :feature_colors.shape[1], :], dim=1)
                     feature_colors = torch.round(feature_colors).to(int)
 
@@ -643,7 +643,7 @@ class SingleMCBlock(PoolBlock):
                         if distances.shape[1] > self.cluster_colors.shape[0]:
                             raise ValueError(f"Cannot visualize {distances.shape[1]} using "
                                              f"{self.cluster_colors.shape[0]} colors!")
-                        feature_colors = torch.sum(torch.softmax(distances / TEMPERATURE, dim=1)[:, :, None].cpu() *
+                        feature_colors = torch.sum(torch.nn.functional.softmin(distances / TEMPERATURE, dim=1)[:, :, None].cpu() *
                                                    self.cluster_colors[None, :distances.shape[1], :], dim=1)
                         feature_colors = torch.round(feature_colors).to(int)
 
