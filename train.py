@@ -146,6 +146,7 @@ current_dataset = UniqueHierarchicalMotifDataset([HouseMotif([0], [0], 1),
                                                  [1/3, 1/3, 1/3],
                                                  [1/3, 1/3, 1/3],
                                                  recolor_lowlevel=True,
+                                                 randomize_colors=True,
                                                  insert_intermediate_nodes=True,
                                                  perturb=0.0)
 
