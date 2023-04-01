@@ -198,6 +198,7 @@ if __name__ == "__main__":
                              'is constant/independent of the input graph size and \"none\" only if the chosen '
                              'classifier can deal with a set of inputs.')
     parser.add_argument('--pooling_type', type=str, default="Perturbed", choices=poolblocks.poolblock.valid_names(),
+                        nargs='+',
                         help='The type of pooling to use.')
 
     parser.add_argument('--dataset', type=parse_json_str, default=current_dataset_wrapper.__dict__(),
@@ -250,8 +251,8 @@ if __name__ == "__main__":
     else:
         os.makedirs(args.save_path)
 
-    for block_args in args.pool_block_args:
-        if args.pooling_type in ["ASAP"] and block_args.get("num_output_nodes", -1) > args.min_nodes:
+    for i, block_args in enumerate(args.pool_block_args):
+        if args.pooling_type[i] in ["ASAP"] and block_args.get("num_output_nodes", -1) > args.min_nodes:
             print(f"The pooling method {args.pooling_type} cannot increase the number of nodes. Increasing "
                   f"min_nodes to {block_args['num_output_nodes']} to guarantee the given fixed number of output nodes.")
             args.min_nodes = block_args["num_output_nodes"]
@@ -287,9 +288,10 @@ if __name__ == "__main__":
         raise ValueError(f"No convolution type named \"{args.conv_type}\" found for dense_data={args.dense_data}!")
     output_layer = output_layers.from_name(args.output_layer)
     gnn_activation = getattr(torch.nn.functional, args.gnn_activation)
+    pooling_block_types = [poolblocks.poolblock.from_name(pt, args.dense_data) for pt in args.pooling_type]
     model = CustomNet(dataset_wrapper.num_node_features, dataset_wrapper.num_classes, args=args, device=device,
                       output_layer_type=output_layer,
-                      pooling_block_type=poolblocks.poolblock.from_name(args.pooling_type, args.dense_data),
+                      pooling_block_types=pooling_block_types,
                       conv_type=conv_type, activation_function=gnn_activation).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)

@@ -65,6 +65,26 @@ class PoolBlock(torch.nn.Module, abc.ABC):
         pass
 
 
+class DenseNoPoolBlock(PoolBlock):
+    """
+    Dense layers without pooling
+    """
+
+    def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
+                 activation_function=F.relu, forced_embeddings=None, **kwargs):
+        super().__init__(embedding_sizes, conv_type, activation_function, forced_embeddings, **kwargs)
+        self.embedding_convs = torch.nn.ModuleList([conv_type(embedding_sizes[i], embedding_sizes[i + 1])
+                                                    for i in range(len(embedding_sizes) - 1)])
+        self.num_output_features = embedding_sizes[-1]
+
+    def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None):
+        if self.forced_embeddings is not None:
+            x = torch.ones(x.shape[:-1] + (self.num_output_features,), device=x.device) * self.forced_embeddings
+        else:
+            for conv in self.embedding_convs:
+                x = self.activation_function(conv(x, adj, mask))
+        return x, adj, None, 0, None, x, mask
+
 class DiffPoolBlock(PoolBlock):
     def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
                  activation_function=F.relu, forced_embeddings=None, **kwargs):
@@ -515,11 +535,13 @@ class SingleMCBlock(PoolBlock):
             # pool_assignments: []
             out, concepts, _, pool_assignments, pool_activations, adjs, masks, input_embeddings =\
                 model(data, collect_info=True)
+            pool_assignments = [pool_assignments[i] for i in range(len(pool_assignments))
+                                if not isinstance(model.graph_network.pool_blocks[i], DenseNoPoolBlock)]
             masks = [data.mask] + masks
             adjs = [data.adj] + adjs
             input_embeddings = [data.x] + input_embeddings
             centroids = [torch.eye(data.x.shape[-1], device=custom_logger.device)] + \
-                        [pb.kmeans.centroids for pb in model.graph_network.pool_blocks]
+                        [pb.kmeans.centroids if hasattr(pb, "kmeans") else None for pb in model.graph_network.pool_blocks]
 
             ############################## Log Graphs ##############################
 
@@ -620,7 +642,7 @@ class SingleMCBlock(PoolBlock):
         self.seen_embeddings = torch.empty((0, self.num_output_features), device=custom_logger.device)
 
 
-__all_dense__ = [DiffPoolBlock, PerturbedBlock, SingleMCBlock]
+__all_dense__ = [DenseNoPoolBlock, DiffPoolBlock, PerturbedBlock, SingleMCBlock]
 __all_sparse__ = [ASAPBlock]
 
 

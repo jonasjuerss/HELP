@@ -19,7 +19,7 @@ from poolblocks.poolblock import PoolBlock
 # Other example: https://github.com/pyg-team/pytorch_geometric/blob/master/examples/proteins_diff_pool.py
 class CustomNet(torch.nn.Module, abc.ABC):
     def __init__(self, num_node_features: int, num_classes: int, args: Namespace, device,
-                 output_layer_type: Type[Classifier], pooling_block_type: Type[PoolBlock],
+                 output_layer_type: Type[Classifier], pooling_block_types: List[Type[PoolBlock]],
                  conv_type: Type[torch.nn.Module], activation_function):
         super().__init__()
         layer_sizes = args.layer_sizes
@@ -34,7 +34,7 @@ class CustomNet(torch.nn.Module, abc.ABC):
 
         network_type = DenseGraphPoolingNetwork if self.dense_data else SparseGraphPoolingNetwork
         self.graph_network = network_type(num_node_features, layer_sizes, pool_block_args,
-                                          pooling_block_type, conv_type=conv_type,
+                                          pooling_block_types, conv_type=conv_type,
                                           activation_function=activation_function,
                                           forced_embeddings=args.forced_embeddings)
 

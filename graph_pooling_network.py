@@ -11,21 +11,24 @@ from poolblocks.poolblock import PoolBlock
 # Other example: https://github.com/pyg-team/pytorch_geometric/blob/master/examples/proteins_diff_pool.py
 class GraphPoolingNetwork(torch.nn.Module, abc.ABC):
     def __init__(self, num_node_features: int, layer_sizes: List[List[int]],
-                 pool_block_args: List[dict], pooling_block_type: Type[PoolBlock],
+                 pool_block_args: List[dict], pooling_block_types: List[Type[PoolBlock]],
                  conv_type=Type[torch.nn.Module], activation_function=torch.nn.functional.relu,
                  forced_embeddings: float=None):
         super().__init__()
         if len(pool_block_args) != len(layer_sizes):
             raise ValueError(f"Expected the length of the pool block arguments ({len(pool_block_args)}) to be the same "
                              f"as the layer sizes ({len(layer_sizes)})!")
+        if len(pooling_block_types) != len(pool_block_args):
+            raise ValueError(f"Number of pooling block types ({len(pooling_block_types)}) mus be the same as the number"
+                             f" of pooling block arguments provided ({len(pool_block_args)})!")
         self.layer_sizes = layer_sizes
         self.num_concepts = layer_sizes[-1][-1]
         self.pool_blocks = torch.nn.ModuleList()
         for i in range(len(pool_block_args)):
-            self.pool_blocks.append(pooling_block_type(embedding_sizes=layer_sizes[i],
-                                                       conv_type=conv_type,
-                                                       activation_function=activation_function,
-                                                       forced_embeddings=forced_embeddings, **pool_block_args[i]))
+            self.pool_blocks.append(pooling_block_types[i](embedding_sizes=layer_sizes[i],
+                                                           conv_type=conv_type,
+                                                           activation_function=activation_function,
+                                                           forced_embeddings=forced_embeddings, **pool_block_args[i]))
 
     @abc.abstractmethod
     def forward(self, data: Data, collect_info=False):
@@ -34,10 +37,10 @@ class GraphPoolingNetwork(torch.nn.Module, abc.ABC):
 
 class DenseGraphPoolingNetwork(GraphPoolingNetwork):
     def __init__(self, num_node_features: int, layer_sizes: List[List[int]],
-                 pool_block_args: List[dict], pooling_block_type: Type[PoolBlock],
+                 pool_block_args: List[dict], pooling_block_types: List[Type[PoolBlock]],
                  conv_type=Type[torch.nn.Module], activation_function=torch.nn.functional.relu,
                  forced_embeddings: float = None):
-        super().__init__(num_node_features, layer_sizes, pool_block_args, pooling_block_type, conv_type,
+        super().__init__(num_node_features, layer_sizes, pool_block_args, pooling_block_types, conv_type,
                          activation_function, forced_embeddings)
 
 
@@ -66,10 +69,10 @@ class DenseGraphPoolingNetwork(GraphPoolingNetwork):
 
 class SparseGraphPoolingNetwork(GraphPoolingNetwork):
     def __init__(self, num_node_features: int, layer_sizes: List[List[int]],
-                 pool_block_args: List[dict], pooling_block_type: Type[PoolBlock],
+                 pool_block_args: List[dict], pooling_block_types: List[Type[PoolBlock]],
                  conv_type=Type[torch.nn.Module], activation_function=torch.nn.functional.relu,
                  forced_embeddings: float = None):
-        super().__init__(num_node_features, layer_sizes, pool_block_args, pooling_block_type, conv_type,
+        super().__init__(num_node_features, layer_sizes, pool_block_args, pooling_block_types, conv_type,
                          activation_function, forced_embeddings)
 
 
