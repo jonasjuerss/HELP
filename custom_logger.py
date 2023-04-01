@@ -2,7 +2,7 @@ import wandb
 device = None
 def init(args):
     if args.use_wandb:
-        wandb.init(project="MPhil-project", entity="jonas-juerss", config=args)
+        wandb.init(project="MPhil-project", entity="jonas-juerss", dir="/tmp/thesis", config=args)
         return wandb.config
     return args
 

@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 import wandb
 from fast_pytorch_kmeans import KMeans
+from torch.distributions import Categorical
 from torch_geometric.data import Data
 from torch_geometric.nn import dense_diff_pool, DenseGCNConv
 from torch_geometric.utils import add_remaining_self_loops, to_dense_batch, k_hop_subgraph
@@ -453,7 +454,20 @@ class SingleMCBlock(PoolBlock):
     """
     def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
                  activation_function=F.relu, forced_embeddings=None, num_concepts: int = None,
-                 global_clusters: bool = True, soft_sampling: bool = False, **kwargs):
+                 global_clusters: bool = True, soft_sampling: float = 0, **kwargs):
+        """
+
+        :param embedding_sizes:
+        :param conv_type:
+        :param activation_function:
+        :param forced_embeddings:
+        :param num_concepts:
+        :param global_clusters:
+        :param soft_sampling: If 0, points will always be mapped to the nearest cluster. Otherwise, this will be the
+        temperature of a softmax that gives the probability a with which a point will be mapped to each cluster, based
+        on the distance from the centroid.
+        :param kwargs:
+        """
         super().__init__(embedding_sizes, conv_type, activation_function, forced_embeddings, **kwargs)
         self.embedding_convs = torch.nn.ModuleList([conv_type(embedding_sizes[i], embedding_sizes[i + 1])
                                                     for i in range(len(embedding_sizes) - 1)])
@@ -496,10 +510,17 @@ class SingleMCBlock(PoolBlock):
             # unlikely anyway. Alternatively one could append test embeddings but then one would need to undo those
             # changes before starting the next round of training to avoid the test data influencing the training
             self.seen_embeddings = torch.cat((self.seen_embeddings, x[mask].detach()), dim=0)
-        if self.use_global_clusters:
+        if not self.use_global_clusters:
+            self.kmeans.fit(x[mask])
+        if self.soft_sampling == 0 or not self.training:
             concept_assignments = self.kmeans.predict(x[mask])
         else:
-            concept_assignments = self.kmeans.fit_predict(x[mask])
+            # https://ai.stackexchange.com/questions/13776/how-is-reinforce-used-instead-of-backpropagation
+            # [num_nodes, num_concepts] (centroids: [num_concepts, embedding_size])
+            assignment_probs = torch.cdist(x[mask], self.kmeans.centroids)
+            assignment_probs = torch.softmax(assignment_probs / self.soft_sampling, dim=-1)
+            distr = Categorical(assignment_probs)
+            concept_assignments = distr.sample()
         # [batch, max_num_nodes] take only the embeddings of nodes that are not masked (otherwise we would
         # get different clusters). Apply kmeans and convert back to dense representation
         concept_assignments, mask_temp = to_dense_batch(concept_assignments,
@@ -543,8 +564,16 @@ class SingleMCBlock(PoolBlock):
             centroids = [torch.eye(data.x.shape[-1], device=custom_logger.device)] + \
                         [pb.kmeans.centroids if hasattr(pb, "kmeans") else None for pb in model.graph_network.pool_blocks]
 
+            ############################## Print Probability Distributions #########
+            for pool_step in range(len(pool_assignments)):
+                temperature = getattr(model.graph_network.pool_blocks[pool_step], "soft_sampling", 0)
+                if temperature != 0:
+                    distances = torch.cdist(input_embeddings[pool_step + 1][masks[pool_step + 1]],
+                                            centroids[pool_step + 1])
+                    max_probs, _ = torch.max(torch.softmax(distances / temperature, dim=-1), dim=-1)
+                    print(f"Probability of most likely concept in pooling step {pool_step}: {100*torch.mean(max_probs):.2f}%"
+                          f"+-{100*torch.std(max_probs):.2f}")
             ############################## Log Graphs ##############################
-
             for graph_i in range(num_graphs_to_log):
                 for pool_step, assignment in enumerate(pool_assignments):
                     # Calculate concept assignment colors
