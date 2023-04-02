@@ -22,13 +22,16 @@ class GraphPoolingNetwork(torch.nn.Module, abc.ABC):
             raise ValueError(f"Number of pooling block types ({len(pooling_block_types)}) mus be the same as the number"
                              f" of pooling block arguments provided ({len(pool_block_args)})!")
         self.layer_sizes = layer_sizes
-        self.num_concepts = layer_sizes[-1][-1]
         self.pool_blocks = torch.nn.ModuleList()
         for i in range(len(pool_block_args)):
             self.pool_blocks.append(pooling_block_types[i](embedding_sizes=layer_sizes[i],
                                                            conv_type=conv_type,
                                                            activation_function=activation_function,
                                                            forced_embeddings=forced_embeddings, **pool_block_args[i]))
+        for i in range(len(pool_block_args) - 1):
+            if self.pool_blocks[i].output_dim != self.pool_blocks[i + 1].input_dim:
+                raise ValueError("Each block must end in the same number of features as the next one has!")
+        self.num_concepts = self.pool_blocks[-1].output_dim
 
     @abc.abstractmethod
     def forward(self, data: Data, collect_info=False):

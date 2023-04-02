@@ -28,9 +28,6 @@ class CustomNet(torch.nn.Module, abc.ABC):
         self.dense_data = args.dense_data
         layer_sizes[0] = [num_node_features] + layer_sizes[0]
         # assert layer_sizes[0][0] == data.num_node_features, "Number of input features must align with input features of dataset"
-        for i in range(len(layer_sizes) - 1):
-            assert layer_sizes[i][-1] == layer_sizes[i + 1][0],\
-                "Each block must end in the same number of features as the next one has"
 
         network_type = DenseGraphPoolingNetwork if self.dense_data else SparseGraphPoolingNetwork
         self.graph_network = network_type(num_node_features, layer_sizes, pool_block_args,
@@ -39,6 +36,7 @@ class CustomNet(torch.nn.Module, abc.ABC):
                                           forced_embeddings=args.forced_embeddings)
 
         num_output_nodes = pool_block_args[-1].get("num_output_nodes", None)
+        output_dim = self.graph_network.pool_blocks[-1].output_dim
         # Recall that for dense data:
         # x: [batch_size, max_num_output_nodes, features_per_output_node]
         # mask: [batch_size, max_num_output_nodes] (booleans)
@@ -57,8 +55,8 @@ class CustomNet(torch.nn.Module, abc.ABC):
                 self.merge_layer = MaskedFlatten()
             else:
                 self.merge_layer = FunctionModule(torch.reshape, {"input": "input"},
-                                                  shape=(-1, layer_sizes[-1][-1] * num_output_nodes))
-            gnn_output_shape = (layer_sizes[-1][-1] * num_output_nodes, )
+                                                  shape=(-1, output_dim * num_output_nodes))
+            gnn_output_shape = (output_dim * num_output_nodes, )
         elif args.output_layer_merge == "none":
             # TODO rethink this when I know what input Pietro's layer wants. The current format of
             #  [num_nodes, num_features] doesn't work because it requires a fixed number of nodes. Not requiring this is
@@ -69,19 +67,19 @@ class CustomNet(torch.nn.Module, abc.ABC):
                 #self.merge_layer = torch.nn.Identity()
             else:
                 pass
-            gnn_output_shape = (num_output_nodes, layer_sizes[-1][-1])
+            gnn_output_shape = (num_output_nodes, output_dim)
         elif args.output_layer_merge == "sum":
             if self.dense_data:
                 self.merge_layer = MaskedSum()
             else:
                 self.merge_layer = FunctionModule(SumAggregation(), {"x": "input", "index": "batch_or_mask"}, dim=-2)
-            gnn_output_shape = (layer_sizes[-1][-1], )
+            gnn_output_shape = (output_dim, )
         elif args.output_layer_merge == "avg":
             if self.dense_data:
                 self.merge_layer = MaskedMean()
             else:
                 self.merge_layer = FunctionModule(MeanAggregation(), {"x": "input", "index": "batch_or_mask"}, dim=-2)
-            gnn_output_shape = (layer_sizes[-1][-1], )
+            gnn_output_shape = (output_dim, )
 
         if self.merge_layer is None:
             raise ValueError(f"Unsupported merge operation for {'dense' if args.dense_data else 'sparse'} data: "

@@ -173,7 +173,7 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=64,
                         help='The batch size to use.')
     parser.add_argument('--add_layer', type=int, nargs='+', action='append',
-                        default=[[16, 16, 16], [16, 16, 16, 16, 4]], dest='layer_sizes',
+                        default=[], dest='layer_sizes',
                         help='The layer sizes to use. Example: --add_layer 16 32 --add_layer 32 64 16 results in a '
                              'network with 2 pooling steps where 5 message passes are performed before the first and ')
     parser.add_argument('--pool_blocks', type=parse_json_str, nargs='+',

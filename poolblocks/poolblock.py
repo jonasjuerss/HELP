@@ -65,6 +65,13 @@ class PoolBlock(torch.nn.Module, abc.ABC):
     def end_epoch(self):
         pass
 
+    @property
+    def input_dim(self):
+        return self.embedding_sizes[0]
+
+    @property
+    def output_dim(self):
+        return self.embedding_sizes[-1]
 
 class DenseNoPoolBlock(PoolBlock):
     """
@@ -76,11 +83,10 @@ class DenseNoPoolBlock(PoolBlock):
         super().__init__(embedding_sizes, conv_type, activation_function, forced_embeddings, **kwargs)
         self.embedding_convs = torch.nn.ModuleList([conv_type(embedding_sizes[i], embedding_sizes[i + 1])
                                                     for i in range(len(embedding_sizes) - 1)])
-        self.num_output_features = embedding_sizes[-1]
 
     def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None):
         if self.forced_embeddings is not None:
-            x = torch.ones(x.shape[:-1] + (self.num_output_features,), device=x.device) * self.forced_embeddings
+            x = torch.ones(x.shape[:-1] + (self.output_dim,), device=x.device) * self.forced_embeddings
         else:
             for conv in self.embedding_convs:
                 x = self.activation_function(conv(x, adj, mask))
@@ -454,7 +460,8 @@ class SingleMCBlock(PoolBlock):
     """
     def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
                  activation_function=F.relu, forced_embeddings=None, num_concepts: int = None,
-                 global_clusters: bool = True, soft_sampling: float = 0, **kwargs):
+                 final_bottleneck: typing.Optional[int] = None, global_clusters: bool = True, soft_sampling: float = 0,
+                 **kwargs):
         """
 
         :param embedding_sizes:
@@ -462,6 +469,7 @@ class SingleMCBlock(PoolBlock):
         :param activation_function:
         :param forced_embeddings:
         :param num_concepts:
+        :param final_bottleneck: if provided, inserts a linear layer AFTER the clustering
         :param global_clusters:
         :param soft_sampling: If 0, points will always be mapped to the nearest cluster. Otherwise, this will be the
         temperature of a softmax that gives the probability a with which a point will be mapped to each cluster, based
@@ -486,6 +494,11 @@ class SingleMCBlock(PoolBlock):
         self.use_global_clusters = False
         self.soft_sampling = soft_sampling
         self.num_concepts = num_concepts
+        self.final_bottleneck_dim = final_bottleneck
+        if self.final_bottleneck_dim:
+            self.final_bottleneck = torch.nn.Linear(embedding_sizes[-1], final_bottleneck)
+        else:
+            self.final_bottleneck = None
         self.cluster_colors = torch.tensor([
             [22, 160, 133],
             [243, 156, 18],
@@ -529,7 +542,11 @@ class SingleMCBlock(PoolBlock):
         assert torch.all(mask_temp == mask)
         # [batch_size, max_num_nodes] assigns each node to a cluster. 0 for masked nodes
         assignments = _calculate_local_clusters_scipy(concept_assignments, adj, mask)
+
         x_new = scatter(x, assignments[:, :, None], reduce="sum", dim=-2)[:, 1:, :]
+        if self.final_bottleneck is not None:
+            # Because both transformations are linear, this should be equivalent to applying it before pooling
+            x_new = self.final_bottleneck(x_new)
         # [batch_size, max_num_nodes, max_num_clusters]: for each node: all clusters it points to (with index 0 (masked nodes) removed)
         adj_new = scatter(adj, assignments[:, :, None], reduce="max", dim=-2)[:, 1:, :]
         # [batch_size, max_num_clusters, max_num_clusters]: for each cluster: all clusters it points to  (with index 0 (masked nodes) removed)
@@ -560,6 +577,7 @@ class SingleMCBlock(PoolBlock):
                                 if not isinstance(model.graph_network.pool_blocks[i], DenseNoPoolBlock)]
             masks = [data.mask] + masks
             adjs = [data.adj] + adjs
+            pool_activations = [data.x] + pool_activations
             input_embeddings = [data.x] + input_embeddings
             centroids = [torch.eye(data.x.shape[-1], device=custom_logger.device)] + \
                         [pb.kmeans.centroids if hasattr(pb, "kmeans") else None for pb in model.graph_network.pool_blocks]
@@ -568,11 +586,15 @@ class SingleMCBlock(PoolBlock):
             for pool_step in range(len(pool_assignments)):
                 temperature = getattr(model.graph_network.pool_blocks[pool_step], "soft_sampling", 0)
                 if temperature != 0:
-                    distances = torch.cdist(input_embeddings[pool_step + 1][masks[pool_step + 1]],
+                    distances = torch.cdist(pool_activations[pool_step + 1][masks[pool_step]],
                                             centroids[pool_step + 1])
-                    max_probs, _ = torch.max(torch.nn.functional.softmin(distances / temperature, dim=-1), dim=-1)
-                    print(f"Probability of most likely concept in pooling step {pool_step}: {100*torch.mean(max_probs):.2f}%"
-                          f"+-{100*torch.std(max_probs):.2f}")
+                    max_probs, arg_max = torch.max(torch.nn.functional.softmin(distances / temperature, dim=-1), dim=-1)
+                    hard_assignments = model.graph_network.pool_blocks[pool_step].kmeans.\
+                        predict(pool_activations[pool_step + 1][masks[pool_step]])
+                    print(f"\nProbability of most likely concept in pooling step {pool_step}: "
+                          f"{100*torch.mean(max_probs):.2f}%+-{100*torch.std(max_probs):.2f} with "
+                          f"{100 * torch.sum(hard_assignments == arg_max) / arg_max.shape[0]:.2f}% of the soft maxima "
+                          f"agreeing with the hard assignment")
             ############################## Log Graphs ##############################
             for graph_i in range(num_graphs_to_log):
                 for pool_step, assignment in enumerate(pool_assignments):
@@ -588,7 +610,7 @@ class SingleMCBlock(PoolBlock):
 
                     # Calculate feature colors
                     # [num_nodes_in_neighbourhood, num_concepts] where (i, j) gives difference between node i and concept j
-                    feature_colors = torch.cdist(input_embeddings[pool_step][graph_i, masks[pool_step][graph_i]],
+                    feature_colors = torch.cdist(pool_activations[pool_step][graph_i, masks[pool_step][graph_i]],
                                                  centroids[pool_step])
                     if feature_colors.shape[1] > self.cluster_colors.shape[0]:
                         raise ValueError(f"Cannot visualize {feature_colors.shape[1]} using "
@@ -638,7 +660,7 @@ class SingleMCBlock(PoolBlock):
                                                                   num_nodes=torch.sum(masks[pool_step][sample]).item())
 
                         # [num_nodes_in_neighbourhood, num_concepts] where (i, j) gives difference between node i and concept j
-                        distances = torch.cdist(input_embeddings[pool_step][sample, masks[pool_step][sample]][subset],
+                        distances = torch.cdist(pool_activations[pool_step][sample, masks[pool_step][sample]][subset],
                                                 centroids[pool_step])
                         if distances.shape[1] > self.cluster_colors.shape[0]:
                             raise ValueError(f"Cannot visualize {distances.shape[1]} using "
@@ -670,6 +692,9 @@ class SingleMCBlock(PoolBlock):
         self.kmeans.fit(self.seen_embeddings)
         self.seen_embeddings = torch.empty((0, self.num_output_features), device=custom_logger.device)
 
+    @PoolBlock.output_dim.getter
+    def output_dim(self):
+        return self.embedding_sizes[-1] if self.final_bottleneck_dim is None else self.final_bottleneck_dim
 
 __all_dense__ = [DenseNoPoolBlock, DiffPoolBlock, PerturbedBlock, SingleMCBlock]
 __all_sparse__ = [ASAPBlock]
