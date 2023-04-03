@@ -41,6 +41,7 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[Dat
     sum_loss = 0
     sum_classification_loss = 0
     sum_pooling_loss = 0
+    sum_sample_probs = 0
     num_classes = model.output_layer.num_classes
     class_counts = torch.zeros(num_classes)
     with nullcontext() if train else torch.no_grad():
@@ -50,7 +51,7 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[Dat
             if train:
                 optimizer.zero_grad()
 
-            out, _, pooling_loss = model(data)
+            out, probabilities, _, pooling_loss = model(data)
             target = data.y
             if dense_data:
                 # For some reason, DataLoader flattens y (e.g. for batch_size=64 and output size 2, it would create one
@@ -60,12 +61,19 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[Dat
                 # future, we might just use reshape instead of unsqueeze to support multiple output values, but the
                 # question, why pytorch geometric behaves this way remains open.
                 target = target.squeeze(1)
-            classification_loss = F.nll_loss(out, target)
+            classification_loss_per_sample = F.nll_loss(out, target, reduction='none')
+            if probabilities is not None:
+                assert not probabilities.requires_grad
+                classification_loss_per_sample = probabilities * classification_loss_per_sample
+                sum_sample_probs += torch.sum(probabilities).item()
+
+            classification_loss = torch.mean(classification_loss_per_sample)
             loss = classification_loss + pooling_loss_weight * pooling_loss + model.custom_losses(batch_size)
 
             sum_loss += batch_size * float(loss)
             sum_classification_loss += batch_size * float(classification_loss)
             sum_pooling_loss += batch_size * float(pooling_loss)
+
             pred_classes = out.argmax(dim=1)
             correct += int((pred_classes == target).sum())
             class_counts += torch.bincount(pred_classes.detach(), minlength=num_classes).cpu()
@@ -76,14 +84,16 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[Dat
     dataset_len = len(loader.dataset)
     mode = "train" if train else "test"
     model.log_custom_losses(mode, epoch, dataset_len)
-    distr_dict = {}
+    additional_dict = {}
     class_counts /= dataset_len
-    if not train:
-        distr_dict = {f"{mode}_percentage_class_{i}": class_counts[i] for i in range(num_classes)}
+    if train:
+        additional_dict = {f"{mode}_avg_sample_prob": sum_sample_probs / dataset_len}
+    else:
+        additional_dict = {f"{mode}_percentage_class_{i}": class_counts[i] for i in range(num_classes)}
     log({f"{mode}_loss": sum_loss / dataset_len,
          f"{mode}_pooling_loss": sum_pooling_loss / dataset_len,
          f"{mode}_classification_loss": sum_classification_loss / dataset_len,
-         f"{mode}_accuracy": correct / dataset_len, **distr_dict},
+         f"{mode}_accuracy": correct / dataset_len, **additional_dict},
         step=epoch)
     model.eval()  # make sure model is always in eval by default
 
@@ -223,6 +233,11 @@ if __name__ == "__main__":
                         help='For debugging. If set, embeddings will not be calculated. Instead, all embeddings of '
                              'nodes with neighbours will be set to the given number and all nodes without neighbours '
                              'will have embedding 0.')
+    parser.set_defaults(use_probability_weights=True)
+    # TODO should I use the log probs instead?
+    parser.add_argument('--no_use_probability_weights', action='store_false', dest='use_probability_weights',
+                        help='Disables weighting the loss contribution of each sample by the probability of all cluster'
+                             'assignments.')
     parser.add_argument('--gnn_activation', type=str, default="leaky_relu",
                         help='Activation function to be used in between the GNN layers')
 

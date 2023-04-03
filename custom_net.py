@@ -22,16 +22,17 @@ class CustomNet(torch.nn.Module, abc.ABC):
                  output_layer_type: Type[Classifier], pooling_block_types: List[Type[PoolBlock]],
                  conv_type: Type[torch.nn.Module], activation_function):
         super().__init__()
-        layer_sizes = args.layer_sizes
+        layer_sizes: List[List[int]] = args.layer_sizes
         pool_block_args: List[dict] = args.pool_block_args
         self.device = device
-        self.dense_data = args.dense_data
+        self.dense_data: bool = args.dense_data
         layer_sizes[0] = [num_node_features] + layer_sizes[0]
         # assert layer_sizes[0][0] == data.num_node_features, "Number of input features must align with input features of dataset"
 
         network_type = DenseGraphPoolingNetwork if self.dense_data else SparseGraphPoolingNetwork
         self.graph_network = network_type(num_node_features, layer_sizes, pool_block_args,
                                           pooling_block_types, conv_type=conv_type,
+                                          use_probability_weights=args.use_probability_weights,
                                           activation_function=activation_function,
                                           forced_embeddings=args.forced_embeddings)
 
@@ -130,14 +131,15 @@ class CustomNet(torch.nn.Module, abc.ABC):
         elif ndim > 3:
             print("Multiple batch dimensions currently might not work as expected!")
 
-        concepts, pooling_loss, pooling_assignments, pooling_activations, batch_or_mask, adjs_or_edge_indices,\
-            all_batch_or_mask, input_embeddings = self.graph_network(data, collect_info=collect_info)
+        concepts, probabilities, pooling_loss, pooling_assignments, pooling_activations, batch_or_mask,\
+            adjs_or_edge_indices, all_batch_or_mask, input_embeddings =\
+            self.graph_network(data, collect_info=collect_info)
         x = self.output_layer(self.merge_layer(input=concepts, batch_or_mask=batch_or_mask))
         if collect_info:
-            return F.log_softmax(x, dim=1), concepts, pooling_loss, pooling_assignments, pooling_activations, \
+            return F.log_softmax(x, dim=1), probabilities, concepts, pooling_loss, pooling_assignments, pooling_activations, \
                 adjs_or_edge_indices, all_batch_or_mask, input_embeddings
         else:
-            return F.log_softmax(x, dim=1), concepts, pooling_loss
+            return F.log_softmax(x, dim=1), probabilities, concepts, pooling_loss
 
 
     def explain(self, train_loader: DataLoader, test_loader: DataLoader, class_names: List[str]):

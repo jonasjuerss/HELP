@@ -48,10 +48,13 @@ class PoolBlock(torch.nn.Module, abc.ABC):
         :param adj_or_edge_index: [batch, num_nodes_max, num_nodes_max] or [2, num_edges_total]
         :param mask_or_batch: [batch, num_nodes_max] or [num_nodes_total]
         :param edge_weights:
+        :param
         :return:
         - new_embeddings [batch, num_nodes_new, num_features_new] or [num_nodes_new_total, num_features_new]
         - new_adj_or_edge_index
         - new_edge_weights (for sparse pooling methods were necessary)
+        - probabilities: optional [batch_size] vector with probability for each sample that will be used as a
+        factor to account for how likely the sampled cluster were
         - pool_loss
         - pool: assignment
         - old_embeddings: Embeddings that went into the pooling operation
@@ -90,7 +93,7 @@ class DenseNoPoolBlock(PoolBlock):
         else:
             for conv in self.embedding_convs:
                 x = self.activation_function(conv(x, adj, mask))
-        return x, adj, None, 0, None, x, mask
+        return x, adj, None, None, 0, None, x, mask
 
 class DiffPoolBlock(PoolBlock):
     def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
@@ -153,7 +156,7 @@ class DiffPoolBlock(PoolBlock):
         # DiffPool will result in the same number of output nodes for all graphs, so we don't need to mask any nodes in
         # subsequent layers
         mask = None
-        return new_embeddings, new_adj, None, loss_l + loss_e, pool, embedding, mask
+        return new_embeddings, new_adj, None, None, loss_l + loss_e, pool, embedding, mask
 
     def log_assignments(self, model: CustomNet, data: Data, num_graphs_to_log: int, epoch: int):
         node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "label", "activations"])
@@ -243,7 +246,7 @@ class ASAPBlock(PoolBlock):
         new_x, edge_index, new_edge_weight, batch, perm, fitness, score = self.asap(x=x, edge_index=edge_index,
                                                                                     batch=batch,
                                                                                     edge_weight=edge_weights)
-        return new_x, edge_index, new_edge_weight, 0, (perm, fitness, score), x, batch
+        return new_x, edge_index, new_edge_weight, None, 0, (perm, fitness, score), x, batch
 
     def log_assignments(self, model: CustomNet, graphs: typing.List[Data], epoch: int):
         node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "border_strength", "border_color",
@@ -446,17 +449,13 @@ class PerturbedBlock(PoolBlock):
         # TODO those 2 choices can't really work, check code
         adj_new = torch.mean(adj_new.reshape(num_samples, -1, adj_new.shape[-2], adj_new.shape[-1]), dim=0)
         mask_new, _ = torch.max(mask_new.reshape(num_samples, -1, mask_new.shape[-1]), dim=0)
-        return x_new, adj_new, None, 0, assignments, x, mask_new
+        return x_new, adj_new, None, None, 0, assignments, x, mask_new
 
 
 class SingleMCBlock(PoolBlock):
     """
     TODO: Challenge: how do I even generate a probability distribution over clustered graphs
         -> just sample before the discrete operation (edge generation), I guess
-
-
-    TODO currently a little shady as we use 1-dimensional embeddings which we then cluster. Maybe turn this up
-        (from [layer_sizes])
     """
     def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
                  activation_function=F.relu, forced_embeddings=None, num_concepts: int = None,
@@ -530,20 +529,27 @@ class SingleMCBlock(PoolBlock):
 
         if (self.soft_sampling != 0 and self.training) or self.clustering_loss_weight != 0:
             # https://ai.stackexchange.com/questions/13776/how-is-reinforce-used-instead-of-backpropagation
-            # [num_nodes, num_concepts] (centroids: [num_concepts, embedding_size])
+            # [num_nodes_total, num_concepts] (centroids: [num_concepts, embedding_size])
             distances = torch.cdist(x[mask], self.kmeans.centroids)
-
+        probabilities = None
+        batch = graphutils.batch_from_mask(mask, x.shape[1])
         if self.soft_sampling == 0 or not self.training:
             concept_assignments = self.kmeans.predict(x[mask])
         else:
+            # [num_nodes_total, num_concepts]
             assignment_probs = torch.nn.functional.softmin(distances / self.soft_sampling, dim=-1)
             distr = Categorical(assignment_probs)
+            # [num_nodes_total]
             concept_assignments = distr.sample()
+            # [num_nodes_total] Note: we only want to use those as weights for the loss but not backpropagate w.r.t. them
+            probabilities = assignment_probs[torch.arange(assignment_probs.shape[0]), concept_assignments].detach()
+            # [batch_size]
+            probabilities = scatter(probabilities, batch, reduce="mul")
+
         # [batch, max_num_nodes] take only the embeddings of nodes that are not masked (otherwise we would
-        # get different clusters). Apply kmeans and convert back to dense representation
-        concept_assignments, mask_temp = to_dense_batch(concept_assignments,
-                                                        batch=graphutils.batch_from_mask(mask, x.shape[1]),
-                                                        batch_size=batch_size, max_num_nodes=x.shape[1])
+        # get different clusters).
+        concept_assignments, mask_temp = to_dense_batch(concept_assignments, batch=batch, batch_size=batch_size,
+                                                        max_num_nodes=x.shape[1])
         assert torch.all(mask_temp == mask)
         # [batch_size, max_num_nodes] assigns each node to a cluster. 0 for masked nodes
         assignments = _calculate_local_clusters_scipy(concept_assignments, adj, mask)
@@ -568,7 +574,7 @@ class SingleMCBlock(PoolBlock):
             if clustering_loss >= 10:
                 # Cap clustering loss at 10 to avoid numerical instability
                 clustering_loss /= (clustering_loss.detach() / 10)
-        return x_new, adj_new, None, clustering_loss, concept_assignments, x, mask_new
+        return x_new, adj_new, None, probabilities, clustering_loss, concept_assignments, x, mask_new
 
     def log_assignments(self, model: CustomNet, data: Data, num_graphs_to_log: int, epoch: int):
         # TODO adjust visualizations for other graphs to new signature
@@ -583,7 +589,7 @@ class SingleMCBlock(PoolBlock):
             data = data.clone().detach().to(device)
             # concepts: [batch_size, max_num_nodes_final_layer, embedding_dim_out_final_layer] the node embeddings of the final graph
             # pool_assignments: []
-            out, concepts, _, pool_assignments, pool_activations, adjs, masks, input_embeddings =\
+            out, _, concepts, _, pool_assignments, pool_activations, adjs, masks, input_embeddings =\
                 model(data, collect_info=True)
             pool_assignments = [pool_assignments[i] for i in range(len(pool_assignments))
                                 if not isinstance(model.graph_network.pool_blocks[i], DenseNoPoolBlock)]
