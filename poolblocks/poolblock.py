@@ -461,6 +461,7 @@ class SingleMCBlock(PoolBlock):
     def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
                  activation_function=F.relu, forced_embeddings=None, num_concepts: int = None,
                  final_bottleneck: typing.Optional[int] = None, global_clusters: bool = True, soft_sampling: float = 0,
+                 clustering_loss_weight: float = 0.0,
                  **kwargs):
         """
 
@@ -495,6 +496,7 @@ class SingleMCBlock(PoolBlock):
         self.soft_sampling = soft_sampling
         self.num_concepts = num_concepts
         self.final_bottleneck_dim = final_bottleneck
+        self.clustering_loss_weight = clustering_loss_weight
         if self.final_bottleneck_dim:
             self.final_bottleneck = torch.nn.Linear(embedding_sizes[-1], final_bottleneck)
         else:
@@ -525,13 +527,16 @@ class SingleMCBlock(PoolBlock):
             self.seen_embeddings = torch.cat((self.seen_embeddings, x[mask].detach()), dim=0)
         if not self.use_global_clusters:
             self.kmeans.fit(x[mask])
+
+        if (self.soft_sampling != 0 and self.training) or self.clustering_loss_weight != 0:
+            # https://ai.stackexchange.com/questions/13776/how-is-reinforce-used-instead-of-backpropagation
+            # [num_nodes, num_concepts] (centroids: [num_concepts, embedding_size])
+            distances = torch.cdist(x[mask], self.kmeans.centroids)
+
         if self.soft_sampling == 0 or not self.training:
             concept_assignments = self.kmeans.predict(x[mask])
         else:
-            # https://ai.stackexchange.com/questions/13776/how-is-reinforce-used-instead-of-backpropagation
-            # [num_nodes, num_concepts] (centroids: [num_concepts, embedding_size])
-            assignment_probs = torch.cdist(x[mask], self.kmeans.centroids)
-            assignment_probs = torch.nn.functional.softmin(assignment_probs / self.soft_sampling, dim=-1)
+            assignment_probs = torch.nn.functional.softmin(distances / self.soft_sampling, dim=-1)
             distr = Categorical(assignment_probs)
             concept_assignments = distr.sample()
         # [batch, max_num_nodes] take only the embeddings of nodes that are not masked (otherwise we would
@@ -556,7 +561,14 @@ class SingleMCBlock(PoolBlock):
         num_clusters, _ = torch.max(assignments, dim=-1)
         # [batch_size, max_num_clusters]: True iff cluster/new node index is valid / less than the number of clusters in that batch element
         mask_new = torch.arange(x_new.shape[-2], device=custom_logger.device)[None, :] < num_clusters[:, None]
-        return x_new, adj_new, None, 0, concept_assignments, x, mask_new
+        if self.clustering_loss_weight == 0:
+            clustering_loss = 0
+        else:
+            clustering_loss = self.clustering_loss_weight * torch.linalg.vector_norm(torch.min(distances, dim=-1)[0])
+            if clustering_loss >= 10:
+                # Cap clustering loss at 10 to avoid numerical instability
+                clustering_loss /= (clustering_loss.detach() / 10)
+        return x_new, adj_new, None, clustering_loss, concept_assignments, x, mask_new
 
     def log_assignments(self, model: CustomNet, data: Data, num_graphs_to_log: int, epoch: int):
         # TODO adjust visualizations for other graphs to new signature
