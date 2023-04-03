@@ -32,7 +32,7 @@ class CustomNet(torch.nn.Module, abc.ABC):
         network_type = DenseGraphPoolingNetwork if self.dense_data else SparseGraphPoolingNetwork
         self.graph_network = network_type(num_node_features, layer_sizes, pool_block_args,
                                           pooling_block_types, conv_type=conv_type,
-                                          use_probability_weights=args.use_probability_weights,
+                                          use_probability_weights=args.probability_weights != "none",
                                           activation_function=activation_function,
                                           forced_embeddings=args.forced_embeddings)
 

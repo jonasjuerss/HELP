@@ -34,14 +34,14 @@ DENSE_CONV_TYPES = [DenseGCNConv]
 SPARSE_CONV_TYPES = [GCNConv]
 
 def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[DataLoader, DenseDataLoader], epoch: int,
-                     pooling_loss_weight: float, dense_data: bool):
+                     pooling_loss_weight: float, dense_data: bool, probability_weights_type: str):
     if train:
         model.train()
+        sum_loss = 0
+        sum_classification_loss = 0
+        sum_pooling_loss = 0
+        sum_sample_probs = 0
     correct = 0
-    sum_loss = 0
-    sum_classification_loss = 0
-    sum_pooling_loss = 0
-    sum_sample_probs = 0
     num_classes = model.output_layer.num_classes
     class_counts = torch.zeros(num_classes)
     with nullcontext() if train else torch.no_grad():
@@ -61,18 +61,23 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[Dat
                 # future, we might just use reshape instead of unsqueeze to support multiple output values, but the
                 # question, why pytorch geometric behaves this way remains open.
                 target = target.squeeze(1)
-            classification_loss_per_sample = F.nll_loss(out, target, reduction='none')
-            if probabilities is not None:
-                assert not probabilities.requires_grad
-                classification_loss_per_sample = probabilities * classification_loss_per_sample
-                sum_sample_probs += torch.sum(probabilities).item()
+            if train:
+                classification_loss_per_sample = F.nll_loss(out, target, reduction='none')
+                if probability_weights_type != "none":
+                    assert not probabilities.requires_grad
+                    if probability_weights_type == "log_prob":
+                        probabilities = torch.log(probabilities)
+                    elif probability_weights_type != "prob":
+                        raise ValueError(f"Unknown probability weights type {probability_weights_type}!")
+                    classification_loss_per_sample = probabilities * classification_loss_per_sample
+                    sum_sample_probs += torch.sum(probabilities).item()
 
-            classification_loss = torch.mean(classification_loss_per_sample)
-            loss = classification_loss + pooling_loss_weight * pooling_loss + model.custom_losses(batch_size)
+                classification_loss = torch.mean(classification_loss_per_sample)
+                loss = classification_loss + pooling_loss_weight * pooling_loss + model.custom_losses(batch_size)
 
-            sum_loss += batch_size * float(loss)
-            sum_classification_loss += batch_size * float(classification_loss)
-            sum_pooling_loss += batch_size * float(pooling_loss)
+                sum_loss += batch_size * float(loss)
+                sum_classification_loss += batch_size * float(classification_loss)
+                sum_pooling_loss += batch_size * float(pooling_loss)
 
             pred_classes = out.argmax(dim=1)
             correct += int((pred_classes == target).sum())
@@ -87,13 +92,14 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[Dat
     additional_dict = {}
     class_counts /= dataset_len
     if train:
-        additional_dict = {f"{mode}_avg_sample_prob": sum_sample_probs / dataset_len}
+        additional_dict = {
+            f"{mode}_loss": sum_loss / dataset_len,
+            f"{mode}_pooling_loss": sum_pooling_loss / dataset_len,
+            f"{mode}_classification_loss": sum_classification_loss / dataset_len,
+            f"{mode}_avg_sample_prob": sum_sample_probs / dataset_len}
     else:
         additional_dict = {f"{mode}_percentage_class_{i}": class_counts[i] for i in range(num_classes)}
-    log({f"{mode}_loss": sum_loss / dataset_len,
-         f"{mode}_pooling_loss": sum_pooling_loss / dataset_len,
-         f"{mode}_classification_loss": sum_classification_loss / dataset_len,
-         f"{mode}_accuracy": correct / dataset_len, **additional_dict},
+    log({f"{mode}_accuracy": correct / dataset_len, **additional_dict},
         step=epoch)
     model.eval()  # make sure model is always in eval by default
 
@@ -233,11 +239,10 @@ if __name__ == "__main__":
                         help='For debugging. If set, embeddings will not be calculated. Instead, all embeddings of '
                              'nodes with neighbours will be set to the given number and all nodes without neighbours '
                              'will have embedding 0.')
-    parser.set_defaults(use_probability_weights=True)
     # TODO should I use the log probs instead?
-    parser.add_argument('--no_use_probability_weights', action='store_false', dest='use_probability_weights',
-                        help='Disables weighting the loss contribution of each sample by the probability of all cluster'
-                             'assignments.')
+    parser.add_argument('--probability_weights', type=str, default="prob", choices=["none", "prob", "log_prob"],
+                        help='The loss contribution of each sample can be weighted by the (log) probability of all '
+                             'sampled cluster assignments (REINFORCE).')
     parser.add_argument('--gnn_activation', type=str, default="leaky_relu",
                         help='Activation function to be used in between the GNN layers')
 
@@ -312,13 +317,15 @@ if __name__ == "__main__":
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
 
     for epoch in tqdm(range(args.num_epochs)):
-        train_test_epoch(True, model, optimizer, train_loader, epoch, args.pooling_loss_weight, args.dense_data)
+        train_test_epoch(True, model, optimizer, train_loader, epoch, args.pooling_loss_weight, args.dense_data,
+                         args.probability_weights)
         if epoch % args.graph_log_freq == 0:
             model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, args.graphs_to_log, epoch)
             # log_embeddings(model, train_loader, args.dense_data, epoch, args.save_path)
         if epoch % args.formula_log_freq == 0:
             log_formulas(model, train_loader, test_loader, dataset_wrapper.class_names, epoch)
-        train_test_epoch(False, model, optimizer, test_loader, epoch, args.pooling_loss_weight, args.dense_data)
+        train_test_epoch(False, model, optimizer, test_loader, epoch, args.pooling_loss_weight, args.dense_data,
+                         args.probability_weights)
         model.end_epoch()
 
     if args.graph_log_freq >= 0:
