@@ -4,6 +4,7 @@ import os
 import typing
 from contextlib import nullcontext
 from datetime import datetime
+from functools import partial
 from multiprocessing import Process
 
 import matplotlib.pyplot as plt
@@ -14,7 +15,7 @@ import wandb
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 from torch_geometric.loader import DataLoader, DenseDataLoader
-from torch_geometric.nn import DenseGCNConv, GCNConv
+from torch_geometric.nn import DenseGCNConv, GCNConv, DenseGINConv
 from tqdm import tqdm
 from typing import Union
 import plotly.express as px
@@ -22,6 +23,7 @@ import plotly.express as px
 import custom_logger
 import output_layers
 import poolblocks.poolblock
+from custom_layers import CustomDenseGINConv
 from custom_logger import log
 from custom_net import CustomNet
 from data_generation.custom_dataset import UniqueMotifCategorizationDataset, CustomDataset, \
@@ -30,8 +32,9 @@ from data_generation.dataset_wrappers import DatasetWrapper, CustomDatasetWrappe
 from data_generation.deserializer import from_dict
 from data_generation.motifs import BinaryTreeMotif, HouseMotif, FullyConnectedMotif, CircleMotif
 
-DENSE_CONV_TYPES = [DenseGCNConv]
+DENSE_CONV_TYPES: typing.List[typing.Type[torch.nn.Module]] = [DenseGCNConv, CustomDenseGINConv]
 SPARSE_CONV_TYPES = [GCNConv]
+VALID_CONV_NAMES = [c.__name__ for c in DENSE_CONV_TYPES + SPARSE_CONV_TYPES]
 
 def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[DataLoader, DenseDataLoader], epoch: int,
                      pooling_loss_weight: float, dense_data: bool, probability_weights_type: str):
@@ -204,7 +207,7 @@ if __name__ == "__main__":
     #                     help='The number of nodes after each pooling step for architectures like DiffPool which require'
     #                          ' to pre-specify that. Note that the last one should be 1 for classification')
 
-    parser.add_argument('--conv_type', type=str, default="DenseGCNConv", choices=["DenseGCNConv", "GCNConv"],
+    parser.add_argument('--conv_type', type=str, default="DenseGCNConv", choices=VALID_CONV_NAMES,
                         help='The type of graph convolution to use.')
     parser.add_argument('--output_layer', type=str, default="DenseClassifier",
                         help='The type of graph convolution to use.')
