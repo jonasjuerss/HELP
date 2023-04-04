@@ -103,3 +103,7 @@ class RedditBinaryWrapper(TUDatasetWrapper):
 class EnzymesWrapper(TUDatasetWrapper):
     def __init__(self):
         super().__init__("ENZYMES", dict())
+
+class ProteinsWrapper(TUDatasetWrapper):
+    def __init__(self):
+        super().__init__("PROTEINS", dict())

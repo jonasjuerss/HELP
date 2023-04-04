@@ -48,6 +48,7 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[Dat
     correct = 0
     num_classes = model.output_layer.num_classes
     class_counts = torch.zeros(num_classes)
+    dataset_len = 0
     with nullcontext() if train else torch.no_grad():
         for data in loader:
             data = data.to(device)
@@ -77,6 +78,7 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[Dat
                         raise ValueError(f"Unknown probability weights type {probability_weights_type}!")
                     classification_loss_per_sample = probabilities * F.nll_loss(out, target, reduction='none')
                     sum_sample_probs += torch.sum(probabilities).item()
+                    dataset_len += probabilities.shape[0]
 
                     classification_loss = torch.mean(classification_loss_per_sample)
                 loss = classification_loss + pooling_loss_weight * pooling_loss + model.custom_losses(batch_size)
@@ -92,7 +94,9 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[Dat
             if train:
                 loss.backward()
                 optimizer.step()
-    dataset_len = len(loader.dataset)
+    if dataset_len == 0:
+        # calculate dataset len the easy way in case we did not use mc samples (and thus already calculated it)
+        dataset_len = len(loader.dataset)
     mode = "train" if train else "test"
     model.log_custom_losses(mode, epoch, dataset_len)
     additional_dict = {}
