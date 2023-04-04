@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import typing
+import warnings
 from contextlib import nullcontext
 from datetime import datetime
 from functools import partial
@@ -65,17 +66,19 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[Dat
                 # question, why pytorch geometric behaves this way remains open.
                 target = target.squeeze(1)
             if train:
-                classification_loss_per_sample = F.nll_loss(out, target, reduction='none')
-                if probability_weights_type != "none":
+                if probability_weights_type == "none":
+                    classification_loss = F.nll_loss(out, target)
+                else:
                     assert not probabilities.requires_grad
+                    target = target.repeat(probabilities.shape[0] // batch_size)
                     if probability_weights_type == "log_prob":
                         probabilities = torch.log(probabilities)
                     elif probability_weights_type != "prob":
                         raise ValueError(f"Unknown probability weights type {probability_weights_type}!")
-                    classification_loss_per_sample = probabilities * classification_loss_per_sample
+                    classification_loss_per_sample = probabilities * F.nll_loss(out, target, reduction='none')
                     sum_sample_probs += torch.sum(probabilities).item()
 
-                classification_loss = torch.mean(classification_loss_per_sample)
+                    classification_loss = torch.mean(classification_loss_per_sample)
                 loss = classification_loss + pooling_loss_weight * pooling_loss + model.custom_losses(batch_size)
 
                 sum_loss += batch_size * float(loss)
@@ -166,7 +169,7 @@ current_dataset = UniqueHierarchicalMotifDataset([HouseMotif([0], [0], 1),
                                                  [1/3, 1/3, 1/3],
                                                  recolor_lowlevel=True,
                                                  randomize_colors=True,
-                                                 one_hot_color=False,
+                                                 one_hot_color=True,
                                                  insert_intermediate_nodes=True,
                                                  perturb=0.0)
 
@@ -274,6 +277,11 @@ if __name__ == "__main__":
         raise ValueError(f"Checkpoint path already exists: {args.save_path}!")
     else:
         os.makedirs(args.save_path)
+
+    if args.probability_weights != "none" and any([block_args.get("soft_sampling", -1) == 0
+                                                   for block_args in args.pool_block_args]):
+        warnings.warn("Cluster assignments are deterministic. Setting probability weights to none.")
+        args.probability_weights = "none"
 
     for i, block_args in enumerate(args.pool_block_args):
         if args.pooling_type[i] in ["ASAP"] and block_args.get("num_output_nodes", -1) > args.min_nodes:

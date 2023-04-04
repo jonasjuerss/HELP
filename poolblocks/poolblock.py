@@ -452,7 +452,7 @@ class PerturbedBlock(PoolBlock):
         return x_new, adj_new, None, None, 0, assignments, x, mask_new
 
 
-class SingleMCBlock(PoolBlock):
+class MonteCarloBlock(PoolBlock):
     """
     TODO: Challenge: how do I even generate a probability distribution over clustered graphs
         -> just sample before the discrete operation (edge generation), I guess
@@ -460,7 +460,7 @@ class SingleMCBlock(PoolBlock):
     def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
                  activation_function=F.relu, forced_embeddings=None, num_concepts: int = None,
                  final_bottleneck: typing.Optional[int] = None, global_clusters: bool = True, soft_sampling: float = 0,
-                 clustering_loss_weight: float = 0.0,
+                 clustering_loss_weight: float = 0.0, num_mc_samples: int = 1,
                  **kwargs):
         """
 
@@ -496,6 +496,10 @@ class SingleMCBlock(PoolBlock):
         self.num_concepts = num_concepts
         self.final_bottleneck_dim = final_bottleneck
         self.clustering_loss_weight = clustering_loss_weight
+        self.num_mc_samples = num_mc_samples
+        if num_mc_samples > 1 and soft_sampling == 0:
+            raise ValueError(f"Multiple monte carlo samples ({num_mc_samples} given) only make sense when sampling is "
+                             f"not deterministic (soft_sampling != 0)!")
         if self.final_bottleneck_dim:
             self.final_bottleneck = torch.nn.Linear(embedding_sizes[-1], final_bottleneck)
         else:
@@ -513,12 +517,21 @@ class SingleMCBlock(PoolBlock):
             [121, 85, 72]], dtype=torch.float)
 
     def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None):
+        """
+
+        :param x:
+        :param adj:
+        :param mask:
+        :param edge_weights:
+        :return: IMPORTANT: the batch size will be multiplied by num_mc_samples
+        """
         if self.forced_embeddings is not None:
             x = torch.ones(x.shape[:-1] + (self.num_output_features,), device=x.device) * self.forced_embeddings
         else:
             for conv in self.embedding_convs:
                 x = self.activation_function(conv(x, adj, mask))
         batch_size = x.shape[0]
+        num_mc_samples = self.num_mc_samples if self.training else 1
         if self.global_clusters and self.training:
             # Only adding training data makes it impossible to generalize to new concepts during test but that's kinda
             # unlikely anyway. Alternatively one could append test embeddings but then one would need to undo those
@@ -539,33 +552,38 @@ class SingleMCBlock(PoolBlock):
             # [num_nodes_total, num_concepts]
             assignment_probs = torch.nn.functional.softmin(distances / self.soft_sampling, dim=-1)
             distr = Categorical(assignment_probs)
-            # [num_nodes_total]
-            concept_assignments = distr.sample()
-            # [num_nodes_total] Note: we only want to use those as weights for the loss but not backpropagate w.r.t. them
-            probabilities = assignment_probs[torch.arange(assignment_probs.shape[0]), concept_assignments].detach()
-            # [batch_size]
+            # [num_mc_samples, num_nodes_total] -> [num_mc_samples * num_nodes_total]
+            concept_assignments = distr.sample((num_mc_samples, )).flatten()
+            # [num_nodes_total * num_mc_samples] Note: we only want to use those as weights for the loss but not backpropagate w.r.t. them
+            probabilities = assignment_probs[
+                torch.arange(assignment_probs.shape[0]).repeat(num_mc_samples),
+                concept_assignments].detach()
+            batch = batch.repeat(num_mc_samples) +\
+                    torch.arange(num_mc_samples, device=adj.device).repeat_interleave(assignment_probs.shape[0]) * batch_size
+            adj = adj.repeat(num_mc_samples, 1, 1)
+            # [batch_size * num_mc_samples]
             probabilities = scatter(probabilities, batch, reduce="mul")
 
         # [batch, max_num_nodes] take only the embeddings of nodes that are not masked (otherwise we would
         # get different clusters).
-        concept_assignments, mask_temp = to_dense_batch(concept_assignments, batch=batch, batch_size=batch_size,
+        concept_assignments, mask_temp = to_dense_batch(concept_assignments, batch=batch,
+                                                        batch_size=batch_size * num_mc_samples,
                                                         max_num_nodes=x.shape[1])
-        assert torch.all(mask_temp == mask)
-        # [batch_size, max_num_nodes] assigns each node to a cluster. 0 for masked nodes
-        assignments = _calculate_local_clusters_scipy(concept_assignments, adj, mask)
-
-        x_new = scatter(x, assignments[:, :, None], reduce="sum", dim=-2)[:, 1:, :]
+        # [batch_size * num_mc_samples, max_num_nodes] assigns each node to a cluster. 0 for masked nodes
+        assignments = _calculate_local_clusters_scipy(concept_assignments, adj, mask.repeat(num_mc_samples, 1))
+        # [batch_size * num_mc_samples, max_num_clusters] (repeat: [batch_size * num_mc_samples, num_nodes_max, num_features])
+        x_new = scatter(x.repeat(num_mc_samples, 1, 1), assignments[:, :, None], reduce="mean", dim=-2)[:, 1:, :]
         if self.final_bottleneck is not None:
             # Because both transformations are linear, this should be equivalent to applying it before pooling
             x_new = self.final_bottleneck(x_new)
-        # [batch_size, max_num_nodes, max_num_clusters]: for each node: all clusters it points to (with index 0 (masked nodes) removed)
+        # [batch_size * num_mc_samples, max_num_nodes, max_num_clusters]: for each node: all clusters it points to (with index 0 (masked nodes) removed)
         adj_new = scatter(adj, assignments[:, :, None], reduce="max", dim=-2)[:, 1:, :]
-        # [batch_size, max_num_clusters, max_num_clusters]: for each cluster: all clusters it points to  (with index 0 (masked nodes) removed)
+        # [batch_size * num_mc_samples, max_num_clusters, max_num_clusters]: for each cluster: all clusters it points to  (with index 0 (masked nodes) removed)
         adj_new = scatter(adj_new, assignments[:, None, :], reduce="max", dim=-1)[:, :, 1:]
 
-        # [batch_size] Note that this gives the number of clusters, not the index because 0 is the placeholder for masked nodes
+        # [batch_size * num_mc_samples] Note that this gives the number of clusters, not the index because 0 is the placeholder for masked nodes
         num_clusters, _ = torch.max(assignments, dim=-1)
-        # [batch_size, max_num_clusters]: True iff cluster/new node index is valid / less than the number of clusters in that batch element
+        # [batch_size * num_mc_samples, max_num_clusters]: True iff cluster/new node index is valid / less than the number of clusters in that batch element
         mask_new = torch.arange(x_new.shape[-2], device=custom_logger.device)[None, :] < num_clusters[:, None]
         if self.clustering_loss_weight == 0:
             clustering_loss = 0
@@ -714,7 +732,7 @@ class SingleMCBlock(PoolBlock):
     def output_dim(self):
         return self.embedding_sizes[-1] if self.final_bottleneck_dim is None else self.final_bottleneck_dim
 
-__all_dense__ = [DenseNoPoolBlock, DiffPoolBlock, PerturbedBlock, SingleMCBlock]
+__all_dense__ = [DenseNoPoolBlock, DiffPoolBlock, PerturbedBlock, MonteCarloBlock]
 __all_sparse__ = [ASAPBlock]
 
 
