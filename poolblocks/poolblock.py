@@ -7,13 +7,13 @@ from typing import List
 import torch
 import torch.nn.functional as F
 import wandb
-from fast_pytorch_kmeans import KMeans
 from torch.distributions import Categorical
 from torch_geometric.data import Data
 from torch_geometric.nn import dense_diff_pool, DenseGCNConv
 from torch_geometric.utils import add_remaining_self_loops, to_dense_batch, k_hop_subgraph
 from torch_scatter import scatter
 
+import clustering_wrappers
 import custom_logger
 import graphutils
 import perturbations
@@ -457,11 +457,10 @@ class MonteCarloBlock(PoolBlock):
     TODO: Challenge: how do I even generate a probability distribution over clustered graphs
         -> just sample before the discrete operation (edge generation), I guess
     """
-    def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
-                 activation_function=F.relu, forced_embeddings=None, num_concepts: int = None,
-                 final_bottleneck: typing.Optional[int] = None, global_clusters: bool = True, soft_sampling: float = 0,
-                 clustering_loss_weight: float = 0.0, num_mc_samples: int = 1,
-                 **kwargs):
+    def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv, activation_function=F.relu,
+                 forced_embeddings=None, cluster_alg: str = "KMeans", final_bottleneck: typing.Optional[int] = None,
+                 global_clusters: bool = True, soft_sampling: float = 0, clustering_loss_weight: float = 0.0,
+                 num_mc_samples: int = 1, **kwargs):
         """
 
         :param embedding_sizes:
@@ -486,14 +485,14 @@ class MonteCarloBlock(PoolBlock):
         #     torch.nn.Linear(embedding_sizes[-1], embedding_sizes[-1]),
         #     torch.nn.ReLU(),
         #     torch.nn.Linear(embedding_sizes[-1], num_concepts))
-        self.kmeans = KMeans(n_clusters=num_concepts, mode='euclidean', verbose=0)
+        self.cluster_alg = clustering_wrappers.get_from_name(cluster_alg)(**kwargs)
+
         self.seen_embeddings = torch.empty((0, self.num_output_features), device=custom_logger.device)
         self.global_clusters = global_clusters
         # In the first epoch, we haven't seen the data yet, so we always need to use local clusters. After that,
         # use_global_clusters will be equal to global_clusters
         self.use_global_clusters = False
         self.soft_sampling = soft_sampling
-        self.num_concepts = num_concepts
         self.final_bottleneck_dim = final_bottleneck
         self.clustering_loss_weight = clustering_loss_weight
         self.num_mc_samples = num_mc_samples
@@ -538,16 +537,16 @@ class MonteCarloBlock(PoolBlock):
             # changes before starting the next round of training to avoid the test data influencing the training
             self.seen_embeddings = torch.cat((self.seen_embeddings, x[mask].detach()), dim=0)
         if not self.use_global_clusters:
-            self.kmeans.fit(x[mask])
+            self.cluster_alg.fit(x[mask].detach())
 
         if (self.soft_sampling != 0 and self.training) or self.clustering_loss_weight != 0:
             # https://ai.stackexchange.com/questions/13776/how-is-reinforce-used-instead-of-backpropagation
             # [num_nodes_total, num_concepts] (centroids: [num_concepts, embedding_size])
-            distances = torch.cdist(x[mask], self.kmeans.centroids)
+            distances = torch.cdist(x[mask], self.cluster_alg.centroids)
         probabilities = None
         batch = graphutils.batch_from_mask(mask, x.shape[1])
         if self.soft_sampling == 0 or not self.training:
-            concept_assignments = self.kmeans.predict(x[mask])
+            concept_assignments = self.cluster_alg.predict(x[mask])
         else:
             # [num_nodes_total, num_concepts]
             assignment_probs = torch.nn.functional.softmin(distances / self.soft_sampling, dim=-1)
@@ -616,7 +615,7 @@ class MonteCarloBlock(PoolBlock):
             pool_activations = [data.x] + pool_activations
             input_embeddings = [data.x] + input_embeddings
             centroids = [torch.eye(data.x.shape[-1], device=custom_logger.device)] + \
-                        [pb.kmeans.centroids if hasattr(pb, "kmeans") else None for pb in model.graph_network.pool_blocks]
+                        [pb.cluster_alg.centroids if hasattr(pb, "cluster_alg") else None for pb in model.graph_network.pool_blocks]
 
             ############################## Print Probability Distributions #########
             for pool_step in range(len(pool_assignments)):
@@ -625,7 +624,7 @@ class MonteCarloBlock(PoolBlock):
                     distances = torch.cdist(pool_activations[pool_step + 1][masks[pool_step]],
                                             centroids[pool_step + 1])
                     max_probs, arg_max = torch.max(torch.nn.functional.softmin(distances / temperature, dim=-1), dim=-1)
-                    hard_assignments = model.graph_network.pool_blocks[pool_step].kmeans.\
+                    hard_assignments = model.graph_network.pool_blocks[pool_step].cluster_alg.\
                         predict(pool_activations[pool_step + 1][masks[pool_step]])
                     print(f"\nProbability of most likely concept in pooling step {pool_step}: "
                           f"{100*torch.mean(max_probs):.2f}%+-{100*torch.std(max_probs):.2f} with "
@@ -677,7 +676,7 @@ class MonteCarloBlock(PoolBlock):
             SAMPLES_PER_CONCEPT = 3
             # This is not ideal as we only sample concepts from the same (first) batch. But we could increase it's size
 
-            for concept in range(self.num_concepts):
+            for concept in torch.unique(assignment).tolist():
                 node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "border_color", "label",
                                           "activations"])
                 edge_table = wandb.Table(["graph", "pool_step", "source", "target"])
@@ -725,7 +724,7 @@ class MonteCarloBlock(PoolBlock):
         if not self.global_clusters:
             return
         self.use_global_clusters = True
-        self.kmeans.fit(self.seen_embeddings)
+        self.cluster_alg.fit(self.seen_embeddings)
         self.seen_embeddings = torch.empty((0, self.num_output_features), device=custom_logger.device)
 
     @PoolBlock.output_dim.getter

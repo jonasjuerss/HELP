@@ -160,10 +160,8 @@ class DCRClassifier(Classifier):
         pass
 
 
-__all__ = [DenseClassifier, EntropyClassifier, DCRClassifier]
-
 def from_name(network_name: str):
-    for n in __all__:
-        if n.__name__ == network_name:
-            return n
-    raise ValueError(f"Unknown classifier name: {network_name}")
+    try:
+        return globals()[network_name]
+    except KeyError:
+        raise ValueError(f"Unknown classifier name: {network_name}")

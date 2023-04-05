@@ -195,7 +195,7 @@ if __name__ == "__main__":
                         help='The weight of the entropy loss in the explanation layer.')
     parser.add_argument('--wd', type=float, default=5e-4,
                         help='The Adam weight decay to use.')
-    parser.add_argument('--num_epochs', type=int, default=10000,
+    parser.add_argument('--num_epochs', type=int, default=20000,
                         help='The number of epochs to train for.')
     parser.add_argument('--batch_size', type=int, default=64,
                         help='The batch size to use.')
