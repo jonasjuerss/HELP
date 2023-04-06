@@ -80,7 +80,7 @@ class PyGWrapper(DatasetWrapper, abc.ABC):
         del self.dummy_dataset
 
         dataset = self.dataset_class(**self.dataset_kwargs, **kwargs)
-        dataset.shuffle()
+        dataset = dataset.shuffle()
         return dataset
 
 class TUDatasetWrapper(PyGWrapper):
