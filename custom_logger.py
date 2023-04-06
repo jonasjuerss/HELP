@@ -1,10 +1,23 @@
 import wandb
 device = None
+wandb_project = "MPhil-project"
+wandb_entity = "jonas-juerss"
+
+
 def init(args):
     if args.use_wandb:
-        wandb.init(project="MPhil-project", entity="jonas-juerss", dir="/tmp/thesis", config=args)
+        wandb_args = dict(
+            project=wandb_project,
+            entity=wandb_entity,
+            dir="/tmp/thesis",
+            config=args
+        )
+        if args.wandb_name is not None:
+            wandb_args["name"] = args.wandb_name
+        wandb.init(**wandb_args)
         return wandb.config
     return args
+
 
 def log(*args, _run=None, **kwargs):
     run = wandb.run if _run is None else _run

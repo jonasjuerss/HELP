@@ -7,6 +7,7 @@ from contextlib import nullcontext
 from datetime import datetime
 from functools import partial
 from multiprocessing import Process
+from types import SimpleNamespace
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -38,7 +39,7 @@ SPARSE_CONV_TYPES = [GCNConv]
 VALID_CONV_NAMES = [c.__name__ for c in DENSE_CONV_TYPES + SPARSE_CONV_TYPES]
 
 def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[DataLoader, DenseDataLoader], epoch: int,
-                     pooling_loss_weight: float, dense_data: bool, probability_weights_type: str):
+                     pooling_loss_weight: float, dense_data: bool, probability_weights_type: str, mode: str):
     if train:
         model.train()
         sum_loss = 0
@@ -51,7 +52,7 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[Dat
     dataset_len = 0
     with nullcontext() if train else torch.no_grad():
         for data in loader:
-            data = data.to(device)
+            data = data.to(custom_logger.device)
             batch_size = data.y.size(0)
             if train:
                 optimizer.zero_grad()
@@ -89,7 +90,8 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[Dat
 
             pred_classes = out.argmax(dim=1)
             correct += int((pred_classes == target).sum())
-            class_counts += torch.bincount(pred_classes.detach(), minlength=num_classes).cpu()
+            if mode == "val":
+                class_counts += torch.bincount(pred_classes.detach(), minlength=num_classes).cpu()
 
             if train:
                 loss.backward()
@@ -97,21 +99,21 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[Dat
     if dataset_len == 0:
         # calculate dataset len the easy way in case we did not use mc samples (and thus already calculated it)
         dataset_len = len(loader.dataset)
-    mode = "train" if train else "test"
     model.log_custom_losses(mode, epoch, dataset_len)
     additional_dict = {}
     class_counts /= dataset_len
-    if train:
+    if mode == "train":
         additional_dict = {
             f"{mode}_loss": sum_loss / dataset_len,
             f"{mode}_pooling_loss": sum_pooling_loss / dataset_len,
             f"{mode}_classification_loss": sum_classification_loss / dataset_len,
             f"{mode}_avg_sample_prob": sum_sample_probs / dataset_len}
-    else:
+    elif mode == "val":
         additional_dict = {f"{mode}_percentage_class_{i}": class_counts[i] for i in range(num_classes)}
     log({f"{mode}_accuracy": correct / dataset_len, **additional_dict},
         step=epoch)
     model.eval()  # make sure model is always in eval by default
+    return correct / dataset_len
 
 
 def log_formulas(model: CustomNet, train_loader: DataLoader, test_loader: DataLoader, class_names: typing.List[str],
@@ -184,6 +186,123 @@ def parse_json_str(s: str):
         s = s[1:-2] # remove possible quotation marks around whole json
     return json.loads(s)
 
+def main(args, **kwargs):
+    if not isinstance(args, dict):
+        args = args.__dict__
+    restore_path = None
+    if args["resume"] is not None:
+        api = wandb.Api()
+        run_path = f"{custom_logger.wandb_entity}/{custom_logger.wandb_project}/" + args["resume"]
+        run = api.run(run_path)
+        save_path = args["save_path"]
+        args = run.config
+        restore_path = args["save_path"] + "/checkpoint.pt"
+        if args["save_wandb"] and not os.path.isfile(restore_path):
+            print("Downloading checkpoint from wandb...")
+            wandb.restore(restore_path, run_path=run_path)
+        args["save_path"] = save_path
+        for k, v in kwargs.items():
+            args[k] = v
+    else:
+        if not args["use_wandb"] and args["save_wandb"]:
+            print("Disabling saving to wandb as logging to wandb is also disabled.")
+            args["save_wandb"] = False
+
+    if isinstance(args, dict):
+        args = SimpleNamespace(**args)
+
+    if "dummy" in args.save_path:
+        pass
+    elif os.path.exists(args.save_path):
+        raise ValueError(f"Checkpoint path already exists: {args.save_path}!")
+    else:
+        os.makedirs(args.save_path)
+
+    if args.probability_weights != "none" and any([block_args.get("soft_sampling", -1) == 0
+                                                   for block_args in args.pool_block_args]):
+        warnings.warn("Cluster assignments are deterministic. Setting probability weights to none.")
+        args.probability_weights = "none"
+
+    for i, block_args in enumerate(args.pool_block_args):
+        if args.pooling_type[i] in ["ASAP"] and block_args.get("num_output_nodes", -1) > args.min_nodes:
+            print(f"The pooling method {args.pooling_type} cannot increase the number of nodes. Increasing "
+                  f"min_nodes to {block_args['num_output_nodes']} to guarantee the given fixed number of output nodes.")
+            args.min_nodes = block_args["num_output_nodes"]
+    args = custom_logger.init(args)
+
+    device = torch.device(args.device)
+    custom_logger.device = device
+    torch.manual_seed(args.seed)
+
+    dataset_wrapper = typing.cast(DatasetWrapper, from_dict(args.dataset))
+    dataset = dataset_wrapper.get_dataset(args.dense_data, args.min_nodes)
+    num_train_samples = int(args.train_split * len(dataset))
+    num_val_samples = int(args.val_split * len(dataset))
+    train_data = dataset[:num_train_samples]
+    val_data = dataset[num_train_samples:num_train_samples + num_val_samples]
+    test_data = dataset[num_train_samples + num_val_samples:]
+
+    if args.dense_data:
+        train_loader = DenseDataLoader(train_data, batch_size=args.batch_size, shuffle=True)
+        test_loader = DenseDataLoader(test_data, batch_size=args.batch_size, shuffle=True)
+        val_loader = DenseDataLoader(val_data, batch_size=args.batch_size, shuffle=True)
+        log_graph_loader = DenseDataLoader(test_data[:args.batch_size], batch_size=args.batch_size, shuffle=False)
+
+    else:
+        train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True)
+        test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=True)
+        val_loader = DataLoader(val_data, batch_size=args.batch_size, shuffle=True)
+        log_graph_loader = DataLoader(test_data[:args.batch_size], batch_size=args.batch_size, shuffle=False)
+
+    # Get last (and only data batch from log_graph_loader)
+    for graphs_to_log in log_graph_loader:
+        pass
+
+    CONV_TYPES = DENSE_CONV_TYPES if args.dense_data else SPARSE_CONV_TYPES
+    conv_type = next((x for x in CONV_TYPES if x.__name__ == args.conv_type), None)
+    if conv_type is None:
+        raise ValueError(f"No convolution type named \"{args.conv_type}\" found for dense_data={args.dense_data}!")
+    output_layer = output_layers.from_name(args.output_layer)
+    gnn_activation = getattr(torch.nn.functional, args.gnn_activation)
+    pooling_block_types = [poolblocks.poolblock.from_name(pt, args.dense_data) for pt in args.pooling_type]
+    model = CustomNet(dataset_wrapper.num_node_features, dataset_wrapper.num_classes, args=args, device=device,
+                      output_layer_type=output_layer,
+                      pooling_block_types=pooling_block_types,
+                      conv_type=conv_type, activation_function=gnn_activation)
+    if restore_path is not None:
+        model.load_state_dict(torch.load(restore_path))
+    model.to(device)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
+    max_val_acc = 0
+    model_save_path = args.save_path + "/checkpoint.pt"
+    for epoch in tqdm(range(args.num_epochs)):
+        train_test_epoch(True, model, optimizer, train_loader, epoch, args.pooling_loss_weight, args.dense_data,
+                         args.probability_weights, "train")
+        if epoch % args.graph_log_freq == 0:
+            model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, args.graphs_to_log, epoch)
+            # log_embeddings(model, train_loader, args.dense_data, epoch, args.save_path)
+        if epoch % args.formula_log_freq == 0:
+            log_formulas(model, train_loader, test_loader, dataset_wrapper.class_names, epoch)
+        test_acc = train_test_epoch(False, model, optimizer, test_loader, epoch, args.pooling_loss_weight,
+                                    args.dense_data, args.probability_weights, "test")
+        val_acc = train_test_epoch(False, model, optimizer, val_loader, epoch, args.pooling_loss_weight,
+                                   args.dense_data, args.probability_weights, "val")
+        if val_acc > max_val_acc:
+            print(f"Saving model with validation accuracy {100*val_acc:.2f}% (test accuracy {100*test_acc:.2f}%)")
+            torch.save(model.state_dict(), model_save_path)
+            if args.save_wandb:
+                wandb.save(model_save_path, policy="now")
+            max_val_acc = val_acc
+            log({"best_val_acc": max_val_acc}, step=epoch)
+        model.end_epoch()
+    if args.num_epochs > 0:
+        if args.graph_log_freq >= 0:
+            model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, args.graphs_to_log, epoch)
+        if args.formula_log_freq >= 0:
+            log_formulas(model, train_loader, test_loader, dataset_wrapper.class_names, epoch)
+    return model, args, dataset_wrapper, train_loader, val_loader, test_loader
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -237,6 +356,8 @@ if __name__ == "__main__":
 
     parser.add_argument('--train_split', type=float, default=0.8,
                         help='Fraction of samples used for the train set.')
+    parser.add_argument('--val_split', type=float, default=0.1,
+                        help='Fraction of samples used for the validation set.')
 
     parser.add_argument('--graph_log_freq', type=int, default=50,
                         help='Every how many epochs to log graphs to wandb. The final predictions will always be '
@@ -275,77 +396,13 @@ if __name__ == "__main__":
     parser.set_defaults(use_wandb=True)
     parser.add_argument('--no_wandb', action='store_false', dest='use_wandb',
                         help='Turns off logging to wandb')
-    args = parser.parse_args()
+    parser.add_argument('--save_wandb', action='store_true', help="Whether to upload the checkpoint files to wandb.")
+    parser.add_argument('--no-save_wandb', dest='save_wandb', action='store_false')
+    parser.set_defaults(save_wandb=True)
+    parser.add_argument('--wandb_name', type=str, default=None,
+                        help="Name of the wandb run. Standard randomly generated wandb names if not specified.")
+    parser.add_argument('--resume', type=str, default=None,
+                        help='Will load configuration from the given wandb run and load the locally stored weights.')
 
-    if os.path.exists(args.save_path):
-        raise ValueError(f"Checkpoint path already exists: {args.save_path}!")
-    else:
-        os.makedirs(args.save_path)
-
-    if args.probability_weights != "none" and any([block_args.get("soft_sampling", -1) == 0
-                                                   for block_args in args.pool_block_args]):
-        warnings.warn("Cluster assignments are deterministic. Setting probability weights to none.")
-        args.probability_weights = "none"
-
-    for i, block_args in enumerate(args.pool_block_args):
-        if args.pooling_type[i] in ["ASAP"] and block_args.get("num_output_nodes", -1) > args.min_nodes:
-            print(f"The pooling method {args.pooling_type} cannot increase the number of nodes. Increasing "
-                  f"min_nodes to {block_args['num_output_nodes']} to guarantee the given fixed number of output nodes.")
-            args.min_nodes = block_args["num_output_nodes"]
-    args = custom_logger.init(args)
-
-    device = torch.device(args.device)
-    custom_logger.device = device
-    torch.manual_seed(args.seed)
-
-    dataset_wrapper = typing.cast(DatasetWrapper, from_dict(args.dataset))
-    dataset = dataset_wrapper.get_dataset(args.dense_data, args.min_nodes)
-    num_train_samples = int(args.train_split * len(dataset))
-    train_data = dataset[:num_train_samples]
-    test_data = dataset[num_train_samples:]
-
-    if args.dense_data:
-        train_loader = DenseDataLoader(train_data, batch_size=args.batch_size, shuffle=True)
-        test_loader = DenseDataLoader(test_data, batch_size=args.batch_size, shuffle=True)
-        log_graph_loader = DenseDataLoader(test_data[:args.batch_size], batch_size=args.batch_size, shuffle=False)
-
-    else:
-        train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True)
-        test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=True)
-        log_graph_loader = DataLoader(test_data[:args.batch_size], batch_size=args.batch_size, shuffle=False)
-
-    # Get last (and only data batch from log_graph_loader)
-    for graphs_to_log in log_graph_loader:
-        pass
-
-    CONV_TYPES = DENSE_CONV_TYPES if args.dense_data else SPARSE_CONV_TYPES
-    conv_type = next((x for x in CONV_TYPES if x.__name__ == args.conv_type), None)
-    if conv_type is None:
-        raise ValueError(f"No convolution type named \"{args.conv_type}\" found for dense_data={args.dense_data}!")
-    output_layer = output_layers.from_name(args.output_layer)
-    gnn_activation = getattr(torch.nn.functional, args.gnn_activation)
-    pooling_block_types = [poolblocks.poolblock.from_name(pt, args.dense_data) for pt in args.pooling_type]
-    model = CustomNet(dataset_wrapper.num_node_features, dataset_wrapper.num_classes, args=args, device=device,
-                      output_layer_type=output_layer,
-                      pooling_block_types=pooling_block_types,
-                      conv_type=conv_type, activation_function=gnn_activation).to(device)
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
-
-    for epoch in tqdm(range(args.num_epochs)):
-        train_test_epoch(True, model, optimizer, train_loader, epoch, args.pooling_loss_weight, args.dense_data,
-                         args.probability_weights)
-        if epoch % args.graph_log_freq == 0:
-            model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, args.graphs_to_log, epoch)
-            # log_embeddings(model, train_loader, args.dense_data, epoch, args.save_path)
-        if epoch % args.formula_log_freq == 0:
-            log_formulas(model, train_loader, test_loader, dataset_wrapper.class_names, epoch)
-        train_test_epoch(False, model, optimizer, test_loader, epoch, args.pooling_loss_weight, args.dense_data,
-                         args.probability_weights)
-        model.end_epoch()
-
-    if args.graph_log_freq >= 0:
-        model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, args.graphs_to_log, epoch)
-    if args.formula_log_freq >= 0:
-        log_formulas(model, train_loader, test_loader, dataset_wrapper.class_names, epoch)
+    main(parser.parse_args())
 

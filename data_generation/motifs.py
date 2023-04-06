@@ -126,6 +126,8 @@ class SparseGraph:
         """
         Adds roughly num_edges ~ Bernoulli(num_nodes, prob) random undirected edges to the graph
         """
+        if prob == 0:
+            return
         num_added_edges = int(torch.distributions.binomial.Binomial(self.num_nodes(),
                                                                     torch.tensor(prob)).sample().item())
         edge_index = torch.randint(0, self.num_nodes(), (2, num_added_edges))
