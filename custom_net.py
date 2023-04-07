@@ -17,11 +17,17 @@ from poolblocks.poolblock import PoolBlock
 
 @dataclass
 class InferenceInfo:
-    pooling_assignments: Any
-    pooling_activations: Any
-    adjs_or_edge_indices: Any
-    all_batch_or_mask: Any
-    input_embeddings: Any
+    pooling_assignments: List[torch.Tensor]
+    """The assignments from nodes to clusters they were pooled to (takes different forms depending on the pooling 
+    method) """
+    pooling_activations: List[torch.Tensor]
+    """The input embeddings to the pooling operation (after applying the GNN layers)"""
+    adjs_or_edge_indices: List[torch.Tensor]
+    """The adjacency matrix or edge index generated for the new (pooled) graph after each layer"""
+    all_batch_or_mask: List[torch.Tensor]
+    """The batch or mask generated for the new (pooled) graph after each layer"""
+    input_embeddings: List[torch.Tensor]
+    """The final output embeddings of each pooling layer, thus the input to the next one"""
 
 # Other example: https://github.com/pyg-team/pytorch_geometric/blob/master/examples/proteins_diff_pool.py
 class CustomNet(torch.nn.Module, abc.ABC):

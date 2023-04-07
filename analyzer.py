@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Type
 
 import matplotlib
 import networkx as nx
@@ -7,6 +7,7 @@ import numpy as np
 import torch_geometric
 from matplotlib import pylab, pyplot as plt
 import torch
+from sklearn.base import BaseEstimator
 from sklearn.cluster import KMeans
 from sklearn.manifold import TSNE
 from torch_geometric.data import DataLoader, Data
@@ -15,6 +16,7 @@ from torch_geometric.utils import k_hop_subgraph
 from torch_scatter import scatter
 from sklearn.tree import DecisionTreeClassifier
 
+from clustering_wrappers import ClusterAlgWrapper
 from data_generation.custom_dataset import HierarchicalMotifGraphTemplate
 from data_generation.dataset_wrappers import CustomDatasetWrapper
 from train import main
@@ -48,7 +50,8 @@ class Analyzer():
         for data in data_loader:
             pass
         data.to(custom_logger.device)
-        out, _, concepts, _, info = self.model(data, collect_info=True)
+        with torch.no_grad():
+            out, _, concepts, _, info = self.model(data, collect_info=True)
         y_pred = torch.argmax(out, dim=1)
         print(f"Accuracy: {100 * torch.sum(y_pred == data.y.squeeze(-1)) / y_pred.shape[0]:.2f}%")
         return data, out, concepts, info, y_pred
@@ -75,6 +78,51 @@ class Analyzer():
                 raise NotImplementedError()
         else:
             raise NotImplementedError()
+
+    def plot_clusters(self, cluster_alg: Optional[Type[ClusterAlgWrapper]] = None, save_path: Optional[str] = None,
+                      dim_reduc: Type[BaseEstimator] = TSNE, **cluster_alg_kwargs):
+        """
+        :param cluster_alg: Type of a clustering algorithm to use. If provided, this will be fitted for every pooling
+        layer. Otherwise, only pooling layers that use clustering will be shown (with the cluster algorithm fitted to
+        the train as of the last pass).
+        :return:
+        """
+        pool_acts_train = self.train_info.pooling_activations
+        masks_train = [self.train_data.mask] + self.train_info.all_batch_or_mask
+        pool_acts_test = self.test_info.pooling_activations
+        masks_test = [self.test_data.mask] + self.test_info.all_batch_or_mask
+        for i in range(len(pool_acts_train)):
+            if cluster_alg is None:
+                if not hasattr(self.model.graph_network.pool_blocks[i], "cluster_alg"):
+                    break
+                cluster_alg_used = self.model.graph_network.pool_blocks[i].cluster_alg
+            else:
+                cluster_alg_used = cluster_alg(**cluster_alg_kwargs)
+                cluster_alg_used.fit(pool_acts_train[i][masks_train[i]])
+
+            num_train_nodes = pool_acts_train[i][masks_train[i]].shape[0]
+            num_nodes = num_train_nodes + pool_acts_test[i][masks_test[i]].shape[0]
+            all_points = torch.cat(
+                (pool_acts_train[i][masks_train[i]], pool_acts_test[i][masks_test[i]], cluster_alg_used.centroids),
+                dim=0).detach().cpu()
+            assignments = cluster_alg_used.predict(all_points).cpu()
+
+            coords = dim_reduc(n_components=2).fit_transform(X=all_points)
+
+            fig, ax = plt.subplots()
+            # o p s
+            ax.scatter(coords[:num_train_nodes, 0], coords[:num_train_nodes, 1],
+                       c=self.colors[assignments[:num_train_nodes]],
+                       marker='s', s=2, label="Train embeddings")
+            ax.scatter(coords[num_train_nodes:num_nodes, 0], coords[num_train_nodes:num_nodes, 1],
+                       c=self.colors[assignments[num_train_nodes:num_nodes]],
+                       marker='p', s=2, label="Test embeddings")
+            ax.scatter(coords[num_nodes:, 0], coords[num_nodes:, 1],
+                       c=self.colors[assignments[num_nodes:]],
+                       marker='o', s=10, label="Centroids")
+            fig.show()
+            if save_path is not None:
+                fig.savefig(f"{save_path}_{i}.pdf", bbox_inches='tight')
 
     ###################################################### Legacy ######################################################
     def plot_clusters(self, K: int):

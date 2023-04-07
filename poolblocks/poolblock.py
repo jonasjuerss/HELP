@@ -606,33 +606,31 @@ class MonteCarloBlock(PoolBlock):
             data = data.clone().detach().to(device)
             # concepts: [batch_size, max_num_nodes_final_layer, embedding_dim_out_final_layer] the node embeddings of the final graph
             out, _, concepts, _, info = model(data, collect_info=True)
-            pool_assignments = info.pooling_assignments
-            pool_activations = info.pooling_activations
-            adjs = info.adjs_or_edge_indices
-            masks = info.all_batch_or_mask
-            input_embeddings = info.input_embeddings
-            pool_assignments = [pool_assignments[i] for i in range(len(pool_assignments))
+            pool_activations = [data.x] + info.pooling_activations
+            adjs = [data.adj] + info.adjs_or_edge_indices
+            masks = [data.mask] + info.all_batch_or_mask
+            input_embeddings = [data.x] + info.input_embeddings
+            pool_assignments = [info.pooling_assignments[i] for i in range(len(info.pooling_assignments))
                                 if not isinstance(model.graph_network.pool_blocks[i], DenseNoPoolBlock)]
-            masks = [data.mask] + masks
-            adjs = [data.adj] + adjs
-            pool_activations = [data.x] + pool_activations
-            input_embeddings = [data.x] + input_embeddings
             centroids = [torch.eye(data.x.shape[-1], device=custom_logger.device)] + \
                         [pb.cluster_alg.centroids if hasattr(pb, "cluster_alg") else None for pb in model.graph_network.pool_blocks]
 
             ############################## Print Probability Distributions #########
             for pool_step in range(len(pool_assignments)):
-                temperature = getattr(model.graph_network.pool_blocks[pool_step], "soft_sampling", 0)
+                pool_block = model.graph_network.pool_blocks[pool_step]
+                temperature = getattr(pool_block, "soft_sampling", 0)
                 if temperature != 0:
                     distances = torch.cdist(pool_activations[pool_step + 1][masks[pool_step]],
                                             centroids[pool_step + 1])
                     max_probs, arg_max = torch.max(torch.nn.functional.softmin(distances / temperature, dim=-1), dim=-1)
-                    hard_assignments = model.graph_network.pool_blocks[pool_step].cluster_alg.\
-                        predict(pool_activations[pool_step + 1][masks[pool_step]])
+                    hard_assignments = pool_block.cluster_alg.predict(pool_activations[pool_step + 1][masks[pool_step]])
                     print(f"\nProbability of most likely concept in pooling step {pool_step}: "
                           f"{100*torch.mean(max_probs):.2f}%+-{100*torch.std(max_probs):.2f} with "
                           f"{100 * torch.sum(hard_assignments == arg_max) / arg_max.shape[0]:.2f}% of the soft maxima "
                           f"agreeing with the hard assignment")
+
+                if isinstance(pool_block.cluster_alg, clustering_wrappers.MeanShiftWrapper):
+                    log({"num_clusters": pool_block.cluster_alg.centroids.shape[0]}, step=epoch)
             ############################## Log Graphs ##############################
             for graph_i in range(num_graphs_to_log):
                 for pool_step, assignment in enumerate(pool_assignments):

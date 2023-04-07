@@ -102,7 +102,7 @@ class MeanShiftWrapper(ClusterAlgWrapper):
             # sparse tensor [num_windows, num_points, feature_dim]
             sparse_tensor = torch.sparse_coo_tensor(indices.T, values, size=(mask.shape[0], mask.shape[1], X.shape[1]))
             # [num_centroids, feature_dim]
-            centroids = torch.sparse.sum(sparse_tensor, dim=1).to_dense() / torch.sum(mask, dim=1)
+            centroids = torch.sparse.sum(sparse_tensor, dim=1).to_dense() / torch.sum(mask, dim=1)[:, None]
         self._centroids = centroids
 
     @property

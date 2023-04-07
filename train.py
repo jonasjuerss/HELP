@@ -232,15 +232,18 @@ def main(args, **kwargs):
 
     device = torch.device(args.device)
     custom_logger.device = device
-    torch.manual_seed(args.seed)
+
 
     dataset_wrapper = typing.cast(DatasetWrapper, from_dict(args.dataset))
+    torch.manual_seed(0)  # Ensure deterministic dataset generation/split
+    np.random.seed(0)
     dataset = dataset_wrapper.get_dataset(args.dense_data, args.min_nodes)
     num_train_samples = int(args.train_split * len(dataset))
     num_val_samples = int(args.val_split * len(dataset))
     train_data = dataset[:num_train_samples]
     val_data = dataset[num_train_samples:num_train_samples + num_val_samples]
     test_data = dataset[num_train_samples + num_val_samples:]
+    torch.manual_seed(args.seed)
 
     if args.dense_data:
         train_loader = DenseDataLoader(train_data, batch_size=args.batch_size, shuffle=True)
@@ -387,7 +390,7 @@ if __name__ == "__main__":
                              'added so that each of them has the same number of nodes).')
 
     parser.add_argument('--seed', type=int, default=1,
-                        help='The seed used for pytorch. This also determines the dataset if generated randomly.')
+                        help='The seed used for pytorch.')
     parser.add_argument('--save_path', type=str,
                         default=os.path.join("models", datetime.now().strftime("%d-%m-%Y_%H-%M-%S")),
                         help='The path to save the checkpoint to. Will be models/dd-mm-YY_HH-MM-SS.pt by default.')
