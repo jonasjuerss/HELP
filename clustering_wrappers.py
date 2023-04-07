@@ -5,8 +5,6 @@ from typing import Union, Optional, Type
 import torch
 from fast_pytorch_kmeans import KMeans
 
-from meanshift.mean_shift_gpu import MeanShiftEuc
-
 
 class ClusterAlgWrapper(abc.ABC):
 
@@ -80,32 +78,33 @@ class KMeansWrapper(ClusterAlgWrapper):
 def get_from_name(name: str) -> Type[ClusterAlgWrapper]:
     return globals()[name + "Wrapper"]
 
-# class MeanShift(CustomClusteringAlgorithm):
-#     """
-#     Inspired by: https://colab.research.google.com/github/sotte/pytorch_tutorial/blob/master/notebooks/mean_shift_clustering.ipynb
-#     """
-#
-#     def __init__(self, bandwidth: int, batch_size: int = 1000):
-#         super().__init__()
-#         self.bandwidth = bandwidth  # TODO this seems to be a super critical parameter, choose wisely
-#         self.batch_size = batch_size
-#         self.divisor = self.bandwidth * math.sqrt(2 * math.pi)
-#
-#
-#     def fit_predict(self, X: torch.Tensor, centroids: torch.Tensor = None) -> torch.Tensor:
-#         for _ in range(self.num_iterations):
-#             for i in range(0, X.shape[0], self.batch_size):
-#                 end_index = min(X.shape[0], i + self.batch_size)
-#                 # [num_points, (remainder of) batch_size] pairwise distance between each point and each point in the batch
-#                 dist = torch.cdist(X, X[i:end_index])
-#                 # [num_points, (remainder of) batch_size]
-#                 weight = torch.exp(-0.5 * (dist / self.bandwidth) ** 2) / self.divisor
-#                 num = (weight[:, :, None] * X[None, :, :]).sum(dim=1)
-#                 X[i:end_index] = num / weight.sum(dim=1)[:, None]
-#         return X
-#
-#     def fit(self, X: torch.Tensor, centroids: Optional[torch.Tensor] = None) -> None:
-#         pass
-#
-#     def predict(self, X: torch.Tensor) -> torch.Tensor:
-#         pass
+class MeanShiftWrapper(ClusterAlgWrapper):
+    def __init__(self, range: int):
+        super().__init__()
+        self.range = range
+        self._centroids = None
+
+
+    def fit(self, X: torch.Tensor) -> None:
+        centroids = X
+        mask_prev = None
+        mask = None
+        while mask_prev is None or not torch.equal(mask, mask_prev):
+            mask_prev = mask
+            # [num_centroids, num_points] boolean mask of  points in the area
+            mask = torch.unique(torch.cdist(centroids, centroids) < self.range, dim=0)
+            # from here on we, basically calculate mask @ centroids / sum(mask, dim=1) in a sparse/more efficient way
+            # [num_points_in_mask, 2] indices of the points
+            indices = torch.argwhere(mask)
+            # [num_points_in_mask, feature_dim] for each point in a radius, all coordinates (note that we ignore
+            # coordinate 0 which just gives) us the row of centroids
+            values = centroids[indices[:, 1]]
+            # sparse tensor [num_windows, num_points, feature_dim]
+            sparse_tensor = torch.sparse_coo_tensor(indices.T, values, size=(mask.shape[0], mask.shape[1], X.shape[1]))
+            # [num_centroids, feature_dim]
+            centroids = torch.sparse.sum(sparse_tensor, dim=1).to_dense() / torch.sum(mask, dim=1)
+        self._centroids = centroids
+
+    @property
+    def centroids(self) -> torch.Tensor:
+        return self._centroids

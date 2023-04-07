@@ -1,6 +1,7 @@
 import abc
 from argparse import Namespace
-from typing import List, Type
+from dataclasses import dataclass
+from typing import List, Type, Any, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -14,7 +15,13 @@ from graph_pooling_network import GraphPoolingNetwork, DenseGraphPoolingNetwork,
 from output_layers import Classifier
 from poolblocks.poolblock import PoolBlock
 
-
+@dataclass
+class InferenceInfo:
+    pooling_assignments: Any
+    pooling_activations: Any
+    adjs_or_edge_indices: Any
+    all_batch_or_mask: Any
+    input_embeddings: Any
 
 # Other example: https://github.com/pyg-team/pytorch_geometric/blob/master/examples/proteins_diff_pool.py
 class CustomNet(torch.nn.Module, abc.ABC):
@@ -136,10 +143,11 @@ class CustomNet(torch.nn.Module, abc.ABC):
             self.graph_network(data, collect_info=collect_info)
         x = self.output_layer(self.merge_layer(input=concepts, batch_or_mask=batch_or_mask))
         if collect_info:
-            return F.log_softmax(x, dim=1), probabilities, concepts, pooling_loss, pooling_assignments, pooling_activations, \
-                adjs_or_edge_indices, all_batch_or_mask, input_embeddings
+            info = InferenceInfo(pooling_assignments, pooling_activations, adjs_or_edge_indices, all_batch_or_mask,
+                                 input_embeddings)
         else:
-            return F.log_softmax(x, dim=1), probabilities, concepts, pooling_loss
+            info = None
+        return F.log_softmax(x, dim=1), probabilities, concepts, pooling_loss, info
 
 
     def explain(self, train_loader: DataLoader, test_loader: DataLoader, class_names: List[str]):

@@ -1,3 +1,6 @@
+from dataclasses import dataclass
+from typing import Optional
+
 import matplotlib
 import networkx as nx
 import numpy as np
@@ -7,23 +10,26 @@ import torch
 from sklearn.cluster import KMeans
 from sklearn.manifold import TSNE
 from torch_geometric.data import DataLoader, Data
+from torch_geometric.loader import DenseDataLoader
 from torch_geometric.utils import k_hop_subgraph
 from torch_scatter import scatter
+from sklearn.tree import DecisionTreeClassifier
 
+from data_generation.custom_dataset import HierarchicalMotifGraphTemplate
+from data_generation.dataset_wrappers import CustomDatasetWrapper
 from train import main
 import custom_logger
 
 
-class Visualizer():
-    def __init__(self, wandb_id: str, data_loader: DataLoader = None):
-        train_loader, val_loader, test_loader = self.load_model(wandb_id)
-        data_loader = test_loader if data_loader is None else data_loader
-        data_loader = data_loader.__class__(data_loader.dataset, batch_size=len(data_loader.dataset), shuffle=False)
-        # extract the first (and only) data batch
-        for data in data_loader:
-            pass
-        self.data = data
-        self.load_whole_dataset()
+
+class Analyzer():
+    def __init__(self, wandb_id: str, train_loader: DataLoader = None, test_loader: DataLoader = None):
+        _train_loader, _val_loader, _test_loader = self.load_model(wandb_id)
+        self.train_data, self.train_out, self.train_concepts, self.train_info, self.train_y_pred =\
+            self.load_whole_dataset(_train_loader if train_loader is None else train_loader)
+        self.test_data, self.test_out, self.test_concepts, self.test_info, self.test_y_pred = \
+            self.load_whole_dataset(_test_loader if test_loader is None else test_loader)
+
         #self.colors = np.array([matplotlib.colors.rgb2hex(c) for c in pylab.get_cmap("tab20").colors])
         self.input_dim : int = self.model.graph_network.pool_blocks[0].input_dim
         self.colors = np.array(
@@ -36,13 +42,41 @@ class Visualizer():
         self.model.eval()
         return train_loader, val_loader, test_loader
 
-    def load_whole_dataset(self):
-        self.data.to(custom_logger.device)
-        self.out, _, self.concepts, _, self.pool_assignments, self.pool_activations, self.adjs, self.masks,\
-            self.input_embeddings = self.model(self.data, collect_info=True)
-        self.y_pred = torch.argmax(self.out, dim=1)
-        print(f"Accuracy: {100 * torch.sum(self.y_pred == self.data.y.squeeze(-1)) / self.y_pred.shape[0]:.2f}%")
+    def load_whole_dataset(self, data_loader: DataLoader):
+        data_loader = data_loader.__class__(data_loader.dataset, batch_size=len(data_loader.dataset), shuffle=False)
+        # extract the first (and only) data batch
+        for data in data_loader:
+            pass
+        data.to(custom_logger.device)
+        out, _, concepts, _, info = self.model(data, collect_info=True)
+        y_pred = torch.argmax(out, dim=1)
+        print(f"Accuracy: {100 * torch.sum(y_pred == data.y.squeeze(-1)) / y_pred.shape[0]:.2f}%")
+        return data, out, concepts, info, y_pred
 
+    def _decision_tree_acc(self, X_train: np.ndarray, Y_train: np.ndarray, X_test: Optional[np.ndarray] = None,
+                           Y_test: Optional[np.ndarray] = None) -> float:
+        """
+
+        :param X_train: [num_points, num_features] points to create the tree
+        :param Y_train: [num_points] labels to create the tree
+        :param X_test: [num_points, num_features] points to measure accuracy (X_train if not given)
+        :param Y_test: [num_points] labels to measure accuracy (Y_train if not given)
+        :return: accuracy of a decision tree fit to the given data
+        """
+        tree = DecisionTreeClassifier
+        tree.fit(X_train, Y_train)
+        return tree.score(X_test if X_test is not None else X_train, Y_test if Y_test is not None else Y_train)
+    def calculate_concept_completeness(self) ->  float:
+        datset_instance = self.dataset_wrapper.get_dataset(self.config.dense_data, 0)
+        if isinstance(self.dataset_wrapper, CustomDatasetWrapper):
+            if isinstance(self.dataset_wrapper.sampler, HierarchicalMotifGraphTemplate):
+                raise NotImplementedError()
+            else:
+                raise NotImplementedError()
+        else:
+            raise NotImplementedError()
+
+    ###################################################### Legacy ######################################################
     def plot_clusters(self, K: int):
         # [num_nodes_total, x, y] (PCA or t-SNE)
         coords = TSNE(n_components=2).fit_transform(X=self.x_out_all)

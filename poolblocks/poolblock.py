@@ -605,9 +605,12 @@ class MonteCarloBlock(PoolBlock):
         with torch.no_grad():
             data = data.clone().detach().to(device)
             # concepts: [batch_size, max_num_nodes_final_layer, embedding_dim_out_final_layer] the node embeddings of the final graph
-            # pool_assignments: []
-            out, _, concepts, _, pool_assignments, pool_activations, adjs, masks, input_embeddings =\
-                model(data, collect_info=True)
+            out, _, concepts, _, info = model(data, collect_info=True)
+            pool_assignments = info.pooling_assignments
+            pool_activations = info.pooling_activations
+            adjs = info.adjs_or_edge_indices
+            masks = info.all_batch_or_mask
+            input_embeddings = info.input_embeddings
             pool_assignments = [pool_assignments[i] for i in range(len(pool_assignments))
                                 if not isinstance(model.graph_network.pool_blocks[i], DenseNoPoolBlock)]
             masks = [data.mask] + masks

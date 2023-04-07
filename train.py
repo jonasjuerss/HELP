@@ -57,7 +57,7 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[Dat
             if train:
                 optimizer.zero_grad()
 
-            out, probabilities, _, pooling_loss = model(data)
+            out, probabilities, _, pooling_loss, _ = model(data)
             target = data.y
             if dense_data:
                 # For some reason, DataLoader flattens y (e.g. for batch_size=64 and output size 2, it would create one
