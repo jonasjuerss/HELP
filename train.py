@@ -4,7 +4,7 @@ import os
 import traceback
 import typing
 import warnings
-from contextlib import nullcontext
+from contextlib import suppress
 from datetime import datetime
 from functools import partial
 from multiprocessing import Process
@@ -51,7 +51,7 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[Dat
     num_classes = model.output_layer.num_classes
     class_counts = torch.zeros(num_classes)
     dataset_len = 0
-    with nullcontext() if train else torch.no_grad():
+    with suppress() if train else torch.no_grad():  # nullcontext() would be better here but is not supported on HPC
         for data in loader:
             data = data.to(custom_logger.device)
             batch_size = data.y.size(0)
