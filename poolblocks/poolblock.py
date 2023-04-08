@@ -1,6 +1,7 @@
 from __future__ import annotations
 import abc
 import typing
+import warnings
 from functools import partial
 from typing import List
 
@@ -504,16 +505,25 @@ class MonteCarloBlock(PoolBlock):
         else:
             self.final_bottleneck = None
         self.cluster_colors = torch.tensor([
-            [22, 160, 133],
-            [243, 156, 18],
-            [142, 68, 173],
-            [192, 57, 43],
-            [44, 62, 80],
-            [41, 128, 185],
-            [39, 174, 96],
-            [211, 84, 0],
-            [39, 174, 96],
-            [121, 85, 72]], dtype=torch.float)
+            [244, 67, 54],
+            [156, 39, 176],
+            [63, 81, 181],
+            [3, 169, 244],
+            [0, 150, 136],
+            [139, 195, 74],
+            [255, 235, 59],
+            [255, 152, 0],
+            [121, 85, 72],
+            [96, 125, 139],
+            [233, 30, 99],
+            [103, 58, 183],
+            [33, 150, 243],
+            [0, 188, 212],
+            [76, 175, 80],
+            [205, 220, 57],
+            [255, 193, 7],
+            [255, 87, 34],
+            [158, 158, 158]], dtype=torch.float)
 
     def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None):
         """
@@ -593,6 +603,14 @@ class MonteCarloBlock(PoolBlock):
                 clustering_loss /= (clustering_loss.detach() / 10)
         return x_new, adj_new, None, probabilities, clustering_loss, concept_assignments, x, mask_new
 
+    def _ensure_min_colors(self, required_colors: int | torch.Tensor, purpose: str):
+        if self.cluster_colors.shape[0] < required_colors:
+            warnings.warn(
+                f"Only {self.cluster_colors.shape[0]} colors given to distinguish {required_colors} "
+                f"{purpose}! Extending with black colors.")
+            self.cluster_colors = torch.cat((self.cluster_colors,
+                                             torch.zeros(required_colors - self.cluster_colors.shape[0], 3,
+                                                         device=self.cluster_colors.device)), dim=0)
     def log_assignments(self, model: CustomNet, data: Data, num_graphs_to_log: int, epoch: int):
         # TODO adjust visualizations for other graphs to new signature
         # IMPORTANT: Here it is crucial to have batches of the size used during training in the forward pass
@@ -625,7 +643,7 @@ class MonteCarloBlock(PoolBlock):
                     max_probs, arg_max = torch.max(torch.nn.functional.softmin(distances / temperature, dim=-1), dim=-1)
                     hard_assignments = pool_block.cluster_alg.predict(pool_activations[pool_step + 1][masks[pool_step]])
                     print(f"\nProbability of most likely concept in pooling step {pool_step}: "
-                          f"{100*torch.mean(max_probs):.2f}%+-{100*torch.std(max_probs):.2f} with "
+                          f"{100 * torch.mean(max_probs):.2f}%+-{100*torch.std(max_probs):.2f} with "
                           f"{100 * torch.sum(hard_assignments == arg_max) / arg_max.shape[0]:.2f}% of the soft maxima "
                           f"agreeing with the hard assignment")
 
@@ -637,10 +655,7 @@ class MonteCarloBlock(PoolBlock):
                     # Calculate concept assignment colors
                     # [num_nodes] (with batch dimension and masked nodes removed)
                     assignment = assignment[graph_i][masks[pool_step][graph_i]].detach().cpu()
-                    if self.cluster_colors.shape[0] <= torch.max(assignment):
-                        raise ValueError(
-                            f"Only {self.cluster_colors.shape[0]} colors given to distinguish {torch.max(assignment)} "
-                            f"clusters!")
+                    self._ensure_min_colors(torch.max(assignment) + 1, "clusters")
                     # [num_nodes, 3] (intermediate dimensions: num_nodes x num_clusters x 3)
                     concept_colors = self.cluster_colors[assignment, :]
 
@@ -648,9 +663,7 @@ class MonteCarloBlock(PoolBlock):
                     # [num_nodes_in_neighbourhood, num_concepts] where (i, j) gives difference between node i and concept j
                     feature_colors = torch.cdist(pool_activations[pool_step][graph_i, masks[pool_step][graph_i]],
                                                  centroids[pool_step])
-                    if feature_colors.shape[1] > self.cluster_colors.shape[0]:
-                        raise ValueError(f"Cannot visualize {feature_colors.shape[1]} using "
-                                         f"{self.cluster_colors.shape[0]} colors!")
+                    self._ensure_min_colors(feature_colors.shape[1], "features")
                     feature_colors = torch.sum(torch.nn.functional.softmin(feature_colors / TEMPERATURE, dim=1)[:, :, None].cpu() *
                                                self.cluster_colors[None, :feature_colors.shape[1], :], dim=1)
                     feature_colors = torch.round(feature_colors).to(int)

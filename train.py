@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import traceback
 import typing
 import warnings
 from contextlib import nullcontext
@@ -283,7 +284,11 @@ def main(args, **kwargs):
         train_test_epoch(True, model, optimizer, train_loader, epoch, args.pooling_loss_weight, args.dense_data,
                          args.probability_weights, "train")
         if epoch % args.graph_log_freq == 0:
-            model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, args.graphs_to_log, epoch)
+            try:
+                model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, args.graphs_to_log, epoch)
+            except Exception:
+                print("Error occurred while logging:")
+                traceback.print_exc()
             # log_embeddings(model, train_loader, args.dense_data, epoch, args.save_path)
         if epoch % args.formula_log_freq == 0:
             log_formulas(model, train_loader, test_loader, dataset_wrapper.class_names, epoch)
