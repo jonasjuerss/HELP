@@ -1,13 +1,16 @@
 from __future__ import annotations
 import abc
+import json
 import typing
 import warnings
+from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from typing import List
 
 import torch
 import torch.nn.functional as F
 import wandb
+from functorch import vmap
 from torch.distributions import Categorical
 from torch_geometric.data import Data
 from torch_geometric.nn import dense_diff_pool, DenseGCNConv
@@ -19,10 +22,14 @@ import custom_logger
 import graphutils
 import perturbations
 from custom_logger import log
+from data_generation import deserializer
 from graphutils import adj_to_edge_index
 from poolblocks.custom_asap import ASAPooling
 
 from typing import TYPE_CHECKING
+
+from poolblocks.perturbing_distributions import PerturbingDistribution
+
 if TYPE_CHECKING:
     from custom_net import CustomNet
 
@@ -452,6 +459,57 @@ class PerturbedBlock(PoolBlock):
         mask_new, _ = torch.max(mask_new.reshape(num_samples, -1, mask_new.shape[-1]), dim=0)
         return x_new, adj_new, None, None, 0, assignments, x, mask_new
 
+def _generate_assignments(x_mask, adj, mask, batch_size, max_num_nodes, soft_sampling: float, training: bool,
+                          clustering_loss_weight: float, num_mc_samples: 1, use_global_clusters: bool,
+                          cluster_alg: clustering_wrappers.ClusterAlgWrapper, parallel: bool):
+    # Note: if we are not soft sampling, the samples should not have an impact here and are instead meant for the outer
+    # function which calls this one with different perturbations
+    num_mc_samples = num_mc_samples if training and soft_sampling != 0 else 1
+    # Note that pickeling the cluster alg might not be ideal from an efficiency POV
+    if not use_global_clusters:
+        # Avoid copies if unnecessary
+        if parallel:
+            cluster_alg = cluster_alg.fit_copy(x_mask)
+        else:
+            cluster_alg.fit(x_mask.detach())
+
+    if (soft_sampling != 0 and training) or clustering_loss_weight != 0:
+        # https://ai.stackexchange.com/questions/13776/how-is-reinforce-used-instead-of-backpropagation
+        # [num_nodes_total, num_concepts] (centroids: [num_concepts, embedding_size])
+        distances = torch.cdist(x_mask, cluster_alg.centroids)
+    else:
+        distances = None
+    batch = graphutils.batch_from_mask(mask, max_num_nodes)
+    if soft_sampling == 0 or not training:
+        concept_assignments = cluster_alg.predict(x_mask)
+        probabilities = None
+    else:
+        # [num_nodes_total, num_concepts]
+        assignment_probs = torch.nn.functional.softmin(distances / soft_sampling, dim=-1)
+        distr = Categorical(assignment_probs)
+        # [num_mc_samples, num_nodes_total] -> [num_mc_samples * num_nodes_total]
+        concept_assignments = distr.sample((num_mc_samples, )).flatten()
+        # [num_nodes_total * num_mc_samples] Note: we only want to use those as weights for the loss but not backpropagate w.r.t. them
+        probabilities = assignment_probs[
+            torch.arange(assignment_probs.shape[0]).repeat(num_mc_samples),
+            concept_assignments].detach()
+        # [num_nodes_total]
+        batch = batch.repeat(num_mc_samples) +\
+                torch.arange(num_mc_samples, device=adj.device).repeat_interleave(assignment_probs.shape[0]) * batch_size
+        # [batch_size * num_samples, max_num_nodes, max_num_nodes] just a repeated version of the original adjacency
+        adj = adj.repeat(num_mc_samples, 1, 1)
+        # [batch_size * num_mc_samples]
+        probabilities = scatter(probabilities, batch, reduce="mul")
+
+    # [batch_size * num_mc_samples, max_num_nodes] take only the embeddings of nodes that are not masked (otherwise we would
+    # get different clusters).
+    concept_assignments, mak_temp = to_dense_batch(concept_assignments, batch=batch,
+                                                   batch_size=batch_size * num_mc_samples,
+                                                   max_num_nodes=max_num_nodes)
+    # [batch_size * (num_mc_samples if soft_sampling else 1), max_num_nodes] assigns each node to a cluster. 0 for masked nodes
+    assignments = _calculate_local_clusters_scipy(concept_assignments, adj, mask.repeat(num_mc_samples, 1))
+
+    return assignments, concept_assignments, distances, probabilities, batch, cluster_alg.centroids.shape[0]
 
 class MonteCarloBlock(PoolBlock):
     """
@@ -461,7 +519,7 @@ class MonteCarloBlock(PoolBlock):
     def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv, activation_function=F.relu,
                  forced_embeddings=None, cluster_alg: str = "KMeans", final_bottleneck: typing.Optional[int] = None,
                  global_clusters: bool = True, soft_sampling: float = 0, clustering_loss_weight: float = 0.0,
-                 num_mc_samples: int = 1, **kwargs):
+                 perturbation: typing.Optional[dict] = None, num_mc_samples: int = 1, **kwargs):
         """
 
         :param embedding_sizes:
@@ -496,10 +554,15 @@ class MonteCarloBlock(PoolBlock):
         self.soft_sampling = soft_sampling
         self.final_bottleneck_dim = final_bottleneck
         self.clustering_loss_weight = clustering_loss_weight
+        self.perturbation = None if perturbation is None else\
+            typing.cast(PerturbingDistribution, deserializer.from_dict(perturbation))
+
         self.num_mc_samples = num_mc_samples
-        if num_mc_samples > 1 and soft_sampling == 0:
+        if num_mc_samples > 1 and soft_sampling == 0 and perturbation is None:
             raise ValueError(f"Multiple monte carlo samples ({num_mc_samples} given) only make sense when sampling is "
-                             f"not deterministic (soft_sampling != 0)!")
+                             f"not deterministic (soft_sampling != 0 or perturbation != None)!")
+        if soft_sampling != 0 and perturbation is not None:
+            raise ValueError("Soft sampling and perturbed inputs are not intended to be used together!")
         if self.final_bottleneck_dim:
             self.final_bottleneck = torch.nn.Linear(embedding_sizes[-1], final_bottleneck)
         else:
@@ -524,6 +587,9 @@ class MonteCarloBlock(PoolBlock):
             [255, 193, 7],
             [255, 87, 34],
             [158, 158, 158]], dtype=torch.float)
+        if self.perturbation is not None and self.num_mc_samples != 1 and custom_logger.cpu_workers > 0:
+            self.pool = ProcessPoolExecutor(max_workers=custom_logger.cpu_workers)
+
 
     def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None):
         """
@@ -539,47 +605,72 @@ class MonteCarloBlock(PoolBlock):
         else:
             for conv in self.embedding_convs:
                 x = self.activation_function(conv(x, adj, mask))
-        batch_size = x.shape[0]
         num_mc_samples = self.num_mc_samples if self.training else 1
         if self.global_clusters and self.training:
             # Only adding training data makes it impossible to generalize to new concepts during test but that's kinda
             # unlikely anyway. Alternatively one could append test embeddings but then one would need to undo those
             # changes before starting the next round of training to avoid the test data influencing the training
             self.seen_embeddings = torch.cat((self.seen_embeddings, x[mask].detach()), dim=0)
-        if not self.use_global_clusters:
-            self.cluster_alg.fit(x[mask].detach())
 
-        if (self.soft_sampling != 0 and self.training) or self.clustering_loss_weight != 0:
-            # https://ai.stackexchange.com/questions/13776/how-is-reinforce-used-instead-of-backpropagation
-            # [num_nodes_total, num_concepts] (centroids: [num_concepts, embedding_size])
-            distances = torch.cdist(x[mask], self.cluster_alg.centroids)
-        probabilities = None
-        batch = graphutils.batch_from_mask(mask, x.shape[1])
-        if self.soft_sampling == 0 or not self.training:
-            concept_assignments = self.cluster_alg.predict(x[mask])
+
+        # vmap won't work here because it is unable to predict the size and the controlflow depends on data
+        # generate_assigments = vmap(partial(self.generate_assignments, adj=adj, mask=mask, batch_size=x.shape[0],
+        #                                    max_num_nodes=x.shape[1]), randomness="different")
+        # if self.perturbation is None:
+        #     x_in = x[mask][None, ...]
+        # else:
+        #     x_in = self.perturbation(x[mask], self.num_mc_samples)
+        # In case the samples are generated via soft assignment, the first dimension (on which vmap is applied) will
+        # always be 1 and the number of output nodes will be multiplied by num_samples (so vmap doesn't make a difference)
+        # In case of perturbation, the first dimension will be num_samples and we merge the first 2 dimensions
+        # assignments, concept_assignments, distances, probabilities, adj, batch = generate_assigments(x_in)
+        # # [batch_size * num_mc_samples, max_num_nodes]
+        # assignments = assignments.reshape(-1, assignments.shape[2])
+        # # [batch_size * num_mc_samples, max_num_nodes]
+        # concept_assignments = concept_assignments.reshape(-1, assignments.shape[2])
+        # # [num_nodes_total, num_concepts] if soft sampling else None | Caution: here no num_samples
+        # distances = None if distances is None else distances.squeeze(0)
+        # # [num_nodes_total * num_mc_samples] if soft sampling else None
+        # probabilities = None if probabilities is None else probabilities.squeeze(0)
+
+
+        generate_assignments = partial(_generate_assignments, adj=adj, mask=mask, batch_size=x.shape[0],
+                                       max_num_nodes=x.shape[1], soft_sampling=self.soft_sampling,
+                                       training=self.training, clustering_loss_weight=self.clustering_loss_weight,
+                                       num_mc_samples=self.num_mc_samples, use_global_clusters=self.use_global_clusters,
+                                       cluster_alg=self.cluster_alg)
+        batch_size, max_num_nodes = x.shape[:2]
+
+        if self.num_mc_samples == 1 or self.perturbation is None:
+            assignments, concept_assignments, distances, probabilities, batch, self.last_num_clusters =\
+                generate_assignments(x[mask].detach(), parallel=False)
         else:
-            # [num_nodes_total, num_concepts]
-            assignment_probs = torch.nn.functional.softmin(distances / self.soft_sampling, dim=-1)
-            distr = Categorical(assignment_probs)
-            # [num_mc_samples, num_nodes_total] -> [num_mc_samples * num_nodes_total]
-            concept_assignments = distr.sample((num_mc_samples, )).flatten()
-            # [num_nodes_total * num_mc_samples] Note: we only want to use those as weights for the loss but not backpropagate w.r.t. them
-            probabilities = assignment_probs[
-                torch.arange(assignment_probs.shape[0]).repeat(num_mc_samples),
-                concept_assignments].detach()
-            batch = batch.repeat(num_mc_samples) +\
-                    torch.arange(num_mc_samples, device=adj.device).repeat_interleave(assignment_probs.shape[0]) * batch_size
-            adj = adj.repeat(num_mc_samples, 1, 1)
-            # [batch_size * num_mc_samples]
-            probabilities = scatter(probabilities, batch, reduce="mul")
+            distances = probabilities = None  # We are using perturbation, so definitely no soft sampling
+            assignments = torch.empty(batch_size * num_mc_samples, max_num_nodes, device=x.device, dtype=torch.long)
+            concept_assignments = torch.empty(batch_size * num_mc_samples, max_num_nodes, device=x.device, dtype=torch.long)
+            # [num_nodes_total (for all samples together)]
+            batch = torch.empty((0, ), device=x.device, dtype=torch.long)
+            if custom_logger.cpu_workers == 0:
+                for sample in range(num_mc_samples):
+                    # Note that adj is only modified for soft sampling. batch_s is of size [batch_size]
+                    ass_s, conc_ass_s, dist_s, prob_s, batch_s, self.last_num_clusters =\
+                        generate_assignments(self.perturbation(x[mask]).detach(), parallel=False)
+                    assignments[sample * batch_size:(sample + 1) * batch_size] = ass_s
+                    concept_assignments[sample * batch_size:(sample + 1) * batch_size] = conc_ass_s
+                    batch = torch.cat((batch, batch_s), dim=0)
+            else:
+                generate_assignments = partial(generate_assignments, parallel=True)
+                try:
+                    res = self.pool.map(generate_assignments, [self.perturbation(x[mask].detach()) for _ in range(num_mc_samples)])
+                    for sample, (ass_s, conc_ass_s, dist_s, prob_s, batch_s, self.last_num_clusters) in enumerate(res):
+                        assignments[sample * batch_size:(sample + 1) * batch_size] = ass_s
+                        concept_assignments[sample * batch_size:(sample + 1) * batch_size] = conc_ass_s
+                        batch = torch.cat((batch, batch_s), dim=0)
+                except:
+                    self.pool.shutdown()
+                    exit()
+        adj = adj.repeat(num_mc_samples, 1, 1)
 
-        # [batch, max_num_nodes] take only the embeddings of nodes that are not masked (otherwise we would
-        # get different clusters).
-        concept_assignments, mask_temp = to_dense_batch(concept_assignments, batch=batch,
-                                                        batch_size=batch_size * num_mc_samples,
-                                                        max_num_nodes=x.shape[1])
-        # [batch_size * num_mc_samples, max_num_nodes] assigns each node to a cluster. 0 for masked nodes
-        assignments = _calculate_local_clusters_scipy(concept_assignments, adj, mask.repeat(num_mc_samples, 1))
         # [batch_size * num_mc_samples, max_num_clusters] (repeat: [batch_size * num_mc_samples, num_nodes_max, num_features])
         x_new = scatter(x.repeat(num_mc_samples, 1, 1), assignments[:, :, None], reduce="mean", dim=-2)[:, 1:, :]
         if self.final_bottleneck is not None:
@@ -648,7 +739,7 @@ class MonteCarloBlock(PoolBlock):
                           f"agreeing with the hard assignment")
 
                 if isinstance(pool_block.cluster_alg, clustering_wrappers.MeanShiftWrapper):
-                    log({"num_clusters": pool_block.cluster_alg.centroids.shape[0]}, step=epoch)
+                    log({"num_clusters": pool_block.last_num_clusters}, step=epoch)
             ############################## Log Graphs ##############################
             for graph_i in range(num_graphs_to_log):
                 for pool_step, assignment in enumerate(pool_assignments):

@@ -1,5 +1,8 @@
+from typing import Optional
+
 import wandb
 device = None
+cpu_workers: Optional[int] = None
 wandb_project = "MPhil-project"
 wandb_entity = "jonas-juerss"
 

@@ -40,7 +40,8 @@ SPARSE_CONV_TYPES = [GCNConv]
 VALID_CONV_NAMES = [c.__name__ for c in DENSE_CONV_TYPES + SPARSE_CONV_TYPES]
 
 def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[DataLoader, DenseDataLoader], epoch: int,
-                     pooling_loss_weight: float, dense_data: bool, probability_weights_type: str, mode: str):
+                     pooling_loss_weight: float, dense_data: bool, probability_weights_type: str, num_samples: int,
+                     mode: str):
     if train:
         model.train()
         sum_loss = 0
@@ -50,7 +51,6 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[Dat
     correct = 0
     num_classes = model.output_layer.num_classes
     class_counts = torch.zeros(num_classes)
-    dataset_len = 0
     with suppress() if train else torch.no_grad():  # nullcontext() would be better here but is not supported on HPC
         for data in loader:
             data = data.to(custom_logger.device)
@@ -69,18 +69,17 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[Dat
                 # question, why pytorch geometric behaves this way remains open.
                 target = target.squeeze(1)
             if train:
+                target = target.repeat(num_samples)
                 if probability_weights_type == "none":
                     classification_loss = F.nll_loss(out, target)
                 else:
                     assert not probabilities.requires_grad
-                    target = target.repeat(probabilities.shape[0] // batch_size)
                     if probability_weights_type == "log_prob":
                         probabilities = torch.log(probabilities)
                     elif probability_weights_type != "prob":
                         raise ValueError(f"Unknown probability weights type {probability_weights_type}!")
                     classification_loss_per_sample = probabilities * F.nll_loss(out, target, reduction='none')
                     sum_sample_probs += torch.sum(probabilities).item()
-                    dataset_len += probabilities.shape[0]
 
                     classification_loss = torch.mean(classification_loss_per_sample)
                 loss = classification_loss + pooling_loss_weight * pooling_loss + model.custom_losses(batch_size)
@@ -97,9 +96,7 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[Dat
             if train:
                 loss.backward()
                 optimizer.step()
-    if dataset_len == 0:
-        # calculate dataset len the easy way in case we did not use mc samples (and thus already calculated it)
-        dataset_len = len(loader.dataset)
+    dataset_len = len(loader.dataset) * num_samples
     model.log_custom_losses(mode, epoch, dataset_len)
     additional_dict = {}
     class_counts /= dataset_len
@@ -233,6 +230,7 @@ def main(args, **kwargs):
 
     device = torch.device(args.device)
     custom_logger.device = device
+    custom_logger.cpu_workers = args.cpu_workers
 
 
     dataset_wrapper = typing.cast(DatasetWrapper, from_dict(args.dataset))
@@ -280,9 +278,10 @@ def main(args, **kwargs):
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
     max_val_acc = 0
     model_save_path = args.save_path + "/checkpoint.pt"
+    num_samples = np.prod([pb_arg.get("num_mc_samples", 1) for pb_arg in args.pool_block_args])
     for epoch in tqdm(range(args.num_epochs)):
         train_test_epoch(True, model, optimizer, train_loader, epoch, args.pooling_loss_weight, args.dense_data,
-                         args.probability_weights, "train")
+                         args.probability_weights, num_samples, "train")
         if epoch % args.graph_log_freq == 0:
             try:
                 model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, args.graphs_to_log, epoch)
@@ -293,9 +292,9 @@ def main(args, **kwargs):
         if epoch % args.formula_log_freq == 0:
             log_formulas(model, train_loader, test_loader, dataset_wrapper.class_names, epoch)
         test_acc = train_test_epoch(False, model, optimizer, test_loader, epoch, args.pooling_loss_weight,
-                                    args.dense_data, args.probability_weights, "test")
+                                    args.dense_data, args.probability_weights, 1, "test")
         val_acc = train_test_epoch(False, model, optimizer, val_loader, epoch, args.pooling_loss_weight,
-                                   args.dense_data, args.probability_weights, "val")
+                                   args.dense_data, args.probability_weights, 1, "val")
         if val_acc > max_val_acc:
             print(f"Saving model with validation accuracy {100*val_acc:.2f}% (test accuracy {100*test_acc:.2f}%)")
             torch.save(model.state_dict(), model_save_path)
@@ -380,7 +379,7 @@ if __name__ == "__main__":
                              'nodes with neighbours will be set to the given number and all nodes without neighbours '
                              'will have embedding 0.')
     # TODO should I use the log probs instead?
-    parser.add_argument('--probability_weights', type=str, default="prob", choices=["none", "prob", "log_prob"],
+    parser.add_argument('--probability_weights', type=str, default="none", choices=["none", "prob", "log_prob"],
                         help='The loss contribution of each sample can be weighted by the (log) probability of all '
                              'sampled cluster assignments (REINFORCE).')
     parser.add_argument('--gnn_activation', type=str, default="leaky_relu",
@@ -396,6 +395,9 @@ if __name__ == "__main__":
 
     parser.add_argument('--seed', type=int, default=1,
                         help='The seed used for pytorch.')
+    parser.add_argument('--cpu_workers', type=int, default=8,
+                        help='How many workers to spawn for cpu parallelization (like for clustering). '
+                             'If 0, everything will happen in the main process.')
     parser.add_argument('--save_path', type=str,
                         default=os.path.join("models", datetime.now().strftime("%d-%m-%Y_%H-%M-%S")),
                         help='The path to save the checkpoint to. Will be models/dd-mm-YY_HH-MM-SS.pt by default.')

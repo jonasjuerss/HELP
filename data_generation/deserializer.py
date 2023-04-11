@@ -1,6 +1,7 @@
 import data_generation.motifs as motifs
 import data_generation.custom_dataset as custom_dataset
 from data_generation import dataset_wrappers
+from poolblocks import perturbing_distributions
 
 __all__ = [motifs.HouseMotif, motifs.FullyConnectedMotif, motifs.BinaryTreeMotif, motifs.CircleMotif,
 
@@ -12,7 +13,9 @@ __all__ = [motifs.HouseMotif, motifs.FullyConnectedMotif, motifs.BinaryTreeMotif
            dataset_wrappers.TUDatasetWrapper,
            dataset_wrappers.MutagWrapper,
            dataset_wrappers.RedditBinaryWrapper,
-           dataset_wrappers.EnzymesWrapper]
+           dataset_wrappers.EnzymesWrapper,
+
+           perturbing_distributions.GaussianPerturbation]
 
 from data_generation.serializer import ArgSerializable
 

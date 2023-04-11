@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import abc
 import math
 from typing import Union, Optional, Type
@@ -9,7 +11,7 @@ from fast_pytorch_kmeans import KMeans
 class ClusterAlgWrapper(abc.ABC):
 
     def __init__(self, **kwargs):
-        pass
+        self.kwargs = kwargs
     def fit_predict(self, X: torch.Tensor) -> torch.Tensor:
         """
 
@@ -28,8 +30,20 @@ class ClusterAlgWrapper(abc.ABC):
 
     @abc.abstractmethod
     def fit(self, X: torch.Tensor) -> None:
+        """
+        Fits to the given points and returns itself for convenience
+        """
         pass
 
+    def fit_copy(self, X: torch.Tensor) -> ClusterAlgWrapper:
+        """
+        Used to avoid problems when calling fit() in parallel.
+        By default creates a copy using the kwargs given to the super construcor and fits it to the given points.
+        Can be overwritten by subclasses e.g. for efficiency where necessary.
+        """
+        res = self.__class__(**self.kwargs)
+        res.fit(X)
+        return res
     @property
     @abc.abstractmethod
     def centroids(self) -> torch.Tensor:
@@ -80,7 +94,7 @@ def get_from_name(name: str) -> Type[ClusterAlgWrapper]:
 
 class MeanShiftWrapper(ClusterAlgWrapper):
     def __init__(self, range: int):
-        super().__init__()
+        super().__init__(range=range)
         self.range = range
         self._centroids = None
 
