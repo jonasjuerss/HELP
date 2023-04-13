@@ -194,7 +194,7 @@ def main(args, **kwargs):
         run = api.run(run_path)
         save_path = args["save_path"]
         args = run.config
-        restore_path = args["save_path"] + "/checkpoint.pt"
+        restore_path = args["save_path"] + f"/checkpoint{'_last' if args.resume_last else ''}.pt"
         if args["save_wandb"] and not os.path.isfile(restore_path):
             print("Downloading checkpoint from wandb...")
             wandb.restore(restore_path, run_path=run_path)
@@ -277,7 +277,8 @@ def main(args, **kwargs):
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
     max_val_acc = 0
-    model_save_path = args.save_path + "/checkpoint.pt"
+    model_save_path_best = args.save_path + "/checkpoint.pt"
+    model_save_path_last = args.save_path + "/checkpoint_last.pt"
     num_samples = np.prod([pb_arg.get("num_mc_samples", 1) for pb_arg in args.pool_block_args])
     for epoch in tqdm(range(args.num_epochs)):
         train_test_epoch(True, model, optimizer, train_loader, epoch, args.pooling_loss_weight, args.dense_data,
@@ -295,13 +296,17 @@ def main(args, **kwargs):
                                     args.dense_data, args.probability_weights, 1, "test")
         val_acc = train_test_epoch(False, model, optimizer, val_loader, epoch, args.pooling_loss_weight,
                                    args.dense_data, args.probability_weights, 1, "val")
-        if val_acc > max_val_acc:
+        if val_acc >= max_val_acc:
             print(f"Saving model with validation accuracy {100*val_acc:.2f}% (test accuracy {100*test_acc:.2f}%)")
-            torch.save(model.state_dict(), model_save_path)
+            torch.save(model.state_dict(), model_save_path_best)
             if args.save_wandb:
-                wandb.save(model_save_path, policy="now")
+                wandb.save(model_save_path_best, policy="now")
             max_val_acc = val_acc
             log({"best_val_acc": max_val_acc}, step=epoch)
+        if epoch % args.save_freq:
+            torch.save(model.state_dict(), model_save_path_last)
+            if args.save_wandb:
+                wandb.save(model_save_path_last, policy="now")
         model.end_epoch()
     if args.num_epochs > 0:
         if args.graph_log_freq >= 0:
@@ -372,6 +377,9 @@ if __name__ == "__main__":
     parser.add_argument('--formula_log_freq', type=int, default=50,
                         help='Every how many epochs to log explanations to wandb. The final predictions will always be '
                              'logged, except for if this is negative.')
+    parser.add_argument('--save_freq', type=int, default=50,
+                        help='Every how many epochs to save a checkpoint. This is in addition to the best checkpoint of'
+                             ' highest validation accuracy.')
     parser.add_argument('--graphs_to_log', type=int, default=6,
                         help='How many graphs from the training and testing set to log.')
     parser.add_argument('--forced_embeddings', type=float, default=None,
@@ -413,6 +421,10 @@ if __name__ == "__main__":
                         help="Name of the wandb run. Standard randomly generated wandb names if not specified.")
     parser.add_argument('--resume', type=str, default=None,
                         help='Will load configuration from the given wandb run and load the locally stored weights.')
+    parser.add_argument('--resume_last', action='store_true', help="Whether to resume from the last checkpoint."
+                                                                   "By default resuming from the best one.")
+    parser.add_argument('--resume_best', dest='resume_last', action='store_false')
+    parser.set_defaults(resume_last=False)
 
     main(parser.parse_args())
 
