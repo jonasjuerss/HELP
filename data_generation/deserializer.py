@@ -12,6 +12,7 @@ __all__ = [motifs.HouseMotif, motifs.FullyConnectedMotif, motifs.BinaryTreeMotif
            dataset_wrappers.CustomDatasetWrapper,
            dataset_wrappers.TUDatasetWrapper,
            dataset_wrappers.MutagWrapper,
+           dataset_wrappers.MutagenicityWrapper,
            dataset_wrappers.RedditBinaryWrapper,
            dataset_wrappers.EnzymesWrapper,
 

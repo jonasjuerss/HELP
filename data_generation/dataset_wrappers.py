@@ -7,6 +7,7 @@ from torch_geometric.transforms import ToDense, Compose, Constant
 
 import data_generation.serializer as seri
 from data_generation.custom_dataset import CustomDataset
+from data_generation.transforms import RemoveEdgeFeatures
 
 
 class DatasetWrapper(seri.ArgSerializable, abc.ABC):
@@ -51,12 +52,13 @@ class CustomDatasetWrapper(DatasetWrapper, abc.ABC):
 
 class PyGWrapper(DatasetWrapper, abc.ABC):
 
-    def __init__(self, dataset_class: Type[Dataset], dataset_kwargs: dict, args: dict,
+    def __init__(self, dataset_class: Type[Dataset], remove_edge_fts: bool, dataset_kwargs: dict, args: dict,
                  class_names: Optional[List[str]] = None):
         self.dummy_dataset = dataset_class(**dataset_kwargs)
         super().__init__(self.dummy_dataset.num_classes, self.dummy_dataset.num_node_features, args, class_names)
         self.dataset_class = dataset_class
         self.dataset_kwargs = dataset_kwargs
+        self.remove_edge_fts = remove_edge_fts
 
     def _get_dataset(self, dense: bool, min_nodes: int):
         kwargs = dict()
@@ -71,6 +73,9 @@ class PyGWrapper(DatasetWrapper, abc.ABC):
         if not hasattr(d, "x") or d.x is None:
             transforms.append(Constant())
 
+        if self.remove_edge_fts:
+            transforms.append(RemoveEdgeFeatures())
+
         if dense:
             max_nodes = max([d.num_nodes for d in self.dummy_dataset])
             transforms.append(ToDense(num_nodes=max_nodes))
@@ -84,17 +89,19 @@ class PyGWrapper(DatasetWrapper, abc.ABC):
         return dataset
 
 class TUDatasetWrapper(PyGWrapper):
-    def __init__(self, dataset_name: str, args=None, class_names: Optional[List[str]] = None):
+    def __init__(self, dataset_name: str, remove_edge_fts: bool = False, args=None,
+                 class_names: Optional[List[str]] = None):
         if args is None:
             args = dict(dataset_name=dataset_name)
-        super().__init__(TUDataset, dict(root='/tmp', name=dataset_name), args, class_names)
+        super().__init__(TUDataset, remove_edge_fts, dict(root='/tmp', name=dataset_name), args, class_names)
 
 class MutagWrapper(TUDatasetWrapper):
-    """
-    TODO: add support for edge features
-    """
-    def __init__(self):
-        super().__init__("MUTAG", dict(), ["not mutagenic", "mutagenic"])
+    def __init__(self, remove_edge_fts: bool = True):
+        super().__init__("MUTAG", remove_edge_fts, dict(remove_edge_fts=remove_edge_fts), ["not mutagenic", "mutagenic"])
+
+class MutagenicityWrapper(TUDatasetWrapper):
+    def __init__(self, remove_edge_fts: bool = True):
+        super().__init__("Mutagenicity", remove_edge_fts, dict(remove_edge_fts=remove_edge_fts))
 
 class RedditBinaryWrapper(TUDatasetWrapper):
     def __init__(self):
