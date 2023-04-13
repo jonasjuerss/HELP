@@ -279,6 +279,8 @@ def main(args, **kwargs):
     max_val_acc = 0
     model_save_path_best = args.save_path + "/checkpoint.pt"
     model_save_path_last = args.save_path + "/checkpoint_last.pt"
+    save_same_acc_cooldown = 20
+    last_best_save = -save_same_acc_cooldown
     num_samples = np.prod([pb_arg.get("num_mc_samples", 1) for pb_arg in args.pool_block_args])
     for epoch in tqdm(range(args.num_epochs)):
         train_test_epoch(True, model, optimizer, train_loader, epoch, args.pooling_loss_weight, args.dense_data,
@@ -296,12 +298,13 @@ def main(args, **kwargs):
                                     args.dense_data, args.probability_weights, 1, "test")
         val_acc = train_test_epoch(False, model, optimizer, val_loader, epoch, args.pooling_loss_weight,
                                    args.dense_data, args.probability_weights, 1, "val")
-        if val_acc >= max_val_acc:
+        if val_acc > max_val_acc or (val_acc == max_val_acc and last_best_save + save_same_acc_cooldown <= epoch):
             print(f"Saving model with validation accuracy {100*val_acc:.2f}% (test accuracy {100*test_acc:.2f}%)")
             torch.save(model.state_dict(), model_save_path_best)
             if args.save_wandb:
                 wandb.save(model_save_path_best, policy="now")
             max_val_acc = val_acc
+            last_best_save = epoch
             log({"best_val_acc": max_val_acc}, step=epoch)
         if epoch % args.save_freq:
             torch.save(model.state_dict(), model_save_path_last)
