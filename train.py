@@ -39,7 +39,8 @@ DENSE_CONV_TYPES: typing.List[typing.Type[torch.nn.Module]] = [DenseGCNConv, Cus
 SPARSE_CONV_TYPES = [GCNConv]
 VALID_CONV_NAMES = [c.__name__ for c in DENSE_CONV_TYPES + SPARSE_CONV_TYPES]
 
-def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[DataLoader, DenseDataLoader], epoch: int,
+def train_test_epoch(train: bool, model: CustomNet, is_directed: bool, optimizer,
+                     loader: Union[DataLoader, DenseDataLoader], epoch: int,
                      pooling_loss_weight: float, dense_data: bool, probability_weights_type: str, num_samples: int,
                      mode: str):
     if train:
@@ -58,7 +59,7 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer, loader: Union[Dat
             if train:
                 optimizer.zero_grad()
 
-            out, probabilities, _, pooling_loss, _ = model(data)
+            out, probabilities, _, pooling_loss, _ = model(data, is_directed)
             target = data.y
             if dense_data:
                 # For some reason, DataLoader flattens y (e.g. for batch_size=64 and output size 2, it would create one
@@ -281,23 +282,24 @@ def main(args, **kwargs):
     model_save_path_last = args.save_path + "/checkpoint_last.pt"
     save_same_acc_cooldown = 20
     last_best_save = -save_same_acc_cooldown
-    num_samples = np.prod([pb_arg.get("num_mc_samples", 1) for pb_arg in args.pool_block_args])
+    num_samples = np.prod([pb_arg.get("num_mc_samples", 1) for pb_arg in args.pool_block_args]).item()
     for epoch in tqdm(range(args.num_epochs)):
-        train_test_epoch(True, model, optimizer, train_loader, epoch, args.pooling_loss_weight, args.dense_data,
-                         args.probability_weights, num_samples, "train")
+        train_test_epoch(True, model, dataset_wrapper.is_directed, optimizer, train_loader,
+                         epoch, args.pooling_loss_weight, args.dense_data, args.probability_weights, num_samples,
+                         "train")
         if epoch % args.graph_log_freq == 0:
             try:
-                model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, args.graphs_to_log, epoch)
+                model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, dataset_wrapper.is_directed, args.graphs_to_log, epoch)
             except Exception:
                 print("Error occurred while logging:")
                 traceback.print_exc()
             # log_embeddings(model, train_loader, args.dense_data, epoch, args.save_path)
         if epoch % args.formula_log_freq == 0:
             log_formulas(model, train_loader, test_loader, dataset_wrapper.class_names, epoch)
-        test_acc = train_test_epoch(False, model, optimizer, test_loader, epoch, args.pooling_loss_weight,
-                                    args.dense_data, args.probability_weights, 1, "test")
-        val_acc = train_test_epoch(False, model, optimizer, val_loader, epoch, args.pooling_loss_weight,
-                                   args.dense_data, args.probability_weights, 1, "val")
+        test_acc = train_test_epoch(False, model, dataset_wrapper.is_directed, optimizer, test_loader, epoch,
+                                    args.pooling_loss_weight, args.dense_data, args.probability_weights, 1, "test")
+        val_acc = train_test_epoch(False, model, dataset_wrapper.is_directed, optimizer, val_loader, epoch,
+                                   args.pooling_loss_weight, args.dense_data, args.probability_weights, 1, "val")
         if val_acc > max_val_acc or (val_acc == max_val_acc and last_best_save + save_same_acc_cooldown <= epoch):
             print(f"Saving model with validation accuracy {100*val_acc:.2f}% (test accuracy {100*test_acc:.2f}%)")
             torch.save(model.state_dict(), model_save_path_best)
@@ -406,7 +408,7 @@ if __name__ == "__main__":
 
     parser.add_argument('--seed', type=int, default=1,
                         help='The seed used for pytorch.')
-    parser.add_argument('--cpu_workers', type=int, default=8,
+    parser.add_argument('--cpu_workers', type=int, default=0,
                         help='How many workers to spawn for cpu parallelization (like for clustering). '
                              'If 0, everything will happen in the main process.')
     parser.add_argument('--save_path', type=str,

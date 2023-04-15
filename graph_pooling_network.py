@@ -35,7 +35,7 @@ class GraphPoolingNetwork(torch.nn.Module, abc.ABC):
         self.use_probability_weights = use_probability_weights
 
     @abc.abstractmethod
-    def forward(self, data: Data, collect_info=False):
+    def forward(self, data: Data, is_directed: bool, collect_info=False):
         pass
 
 
@@ -49,7 +49,7 @@ class DenseGraphPoolingNetwork(GraphPoolingNetwork):
                          use_probability_weights, activation_function, forced_embeddings)
 
 
-    def forward(self, data: Data, collect_info=False):
+    def forward(self, data: Data, is_directed: bool, collect_info=False):
         x, adj, mask = data.x, data.adj, data.mask  # to_dense_adj(data.edge_index)
         pooling_loss = 0
         probabilities = None
@@ -63,7 +63,7 @@ class DenseGraphPoolingNetwork(GraphPoolingNetwork):
             pooling_assignments = pooling_activations = masks = adjs = input_embeddings = None
 
         for block in self.pool_blocks:
-            x, adj, _, probs, temp_loss, pool, last_embedding, mask = block(x, adj, mask)
+            x, adj, _, probs, temp_loss, pool, last_embedding, mask = block(x, adj, is_directed, mask)
             pooling_loss += temp_loss
             if collect_info:
                 pooling_assignments.append(pool)
@@ -85,7 +85,7 @@ class SparseGraphPoolingNetwork(GraphPoolingNetwork):
                          use_probability_weights, activation_function, forced_embeddings)
 
 
-    def forward(self, data: Data, collect_info=False):
+    def forward(self, data: Data, is_directed: bool, collect_info=False):
         x, edge_index, batch = data.x, data.edge_index, data.batch
         pooling_loss = 0
         probabilities = None
@@ -100,7 +100,8 @@ class SparseGraphPoolingNetwork(GraphPoolingNetwork):
             pooling_assignments = pooling_activations = batches = edge_indices = input_embeddings = None
 
         for block in self.pool_blocks:
-            x, edge_index, edge_weights, probs, temp_loss, pool, last_embedding, batch = block(x, edge_index, batch,
+            x, edge_index, edge_weights, probs, temp_loss, pool, last_embedding, batch = block(x, edge_index,
+                                                                                               is_directed, batch,
                                                                                                edge_weights=edge_weights)
             pooling_loss += temp_loss
             if collect_info:

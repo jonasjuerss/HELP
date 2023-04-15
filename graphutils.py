@@ -34,7 +34,7 @@ def adj_to_edge_index(adj: torch.Tensor, mask: Optional[torch.Tensor] = None)\
     elif adj.ndim == 3:
         masks = torch.logical_and(mask[:, None, :], mask[:, :, None])
         num_nodes = 0
-        edge_index = torch.empty(2, 0, device=custom_logger.device)
+        edge_index = torch.empty(2, 0, device=custom_logger.device, dtype=torch.long)
         batch = torch.empty(0, device=custom_logger.device, dtype=torch.long)
         for i in range(adj.shape[0]):
             cur_adj = adj[i][masks[i, :, :]]
@@ -53,7 +53,8 @@ def draw_graph(data : Data):
     colors = torch.sum(data.x * torch.arange(data.x.shape[1])[None, :], dim=1)
     nx.draw(g, node_color=colors, pos=nx.spring_layout(g, seed=1), with_labels=True)
 
-def sparse_components(edge_index: torch.Tensor, num_nodes: int, connection="strong") -> Tuple[int, torch.Tensor]:
+def sparse_components_scipy(edge_index: torch.Tensor, num_nodes: int, connection="weak", is_directed: bool = True) ->\
+        Tuple[int, torch.Tensor]:
     """
     :param edge_index:  [2, num_edges]
     :param num_nodes:
@@ -66,7 +67,7 @@ def sparse_components(edge_index: torch.Tensor, num_nodes: int, connection="stro
     num_components, component = sp.csgraph.connected_components(adj, connection=connection)
     return num_components, torch.tensor(component, device=custom_logger.device)
 
-def dense_components(adj: torch.Tensor, mask: Optional[torch.Tensor], connection="strong"):
+def dense_components(adj: torch.Tensor, mask: Optional[torch.Tensor], connection="weak", is_directed: bool = True):
     """
 
     :param adj: [max_num_nodes, max_num_nodes] or [batch_size, max_num_nodes, max_num_nodes]
@@ -78,7 +79,7 @@ def dense_components(adj: torch.Tensor, mask: Optional[torch.Tensor], connection
     edge_index, batch, num_nodes = adj_to_edge_index(adj, mask)
     # TODO check if iterating over all samples and therefore having significantly less nodes per search is more efficient despite the overhead of more conversions
     # component: [num_nodes_total]
-    num_components, component = sparse_components(edge_index, num_nodes, connection)
+    num_components, component = sparse_components(edge_index, num_nodes, connection, is_directed)
     # [batch_size] minimum component index for each batch element
     component_starts = scatter(component, batch, reduce="min")
     # [batch_size, max_num_components] (where max_num_components is the maximum number of components in any single batch element)
@@ -91,6 +92,30 @@ def dense_components(adj: torch.Tensor, mask: Optional[torch.Tensor], connection
     dense_component = torch.maximum(dense_component, torch.tensor([0], device=custom_logger.device))
     return dense_component.shape[1], dense_component
 
+def sparse_components_gpu(edge_index: torch.Tensor, num_nodes: int, connection="weak", is_directed: bool = True) ->\
+        Tuple[int, torch.Tensor]:
+    """
+    Find the (weakly)-connected components.
+
+     Source: https://ljeub.github.io/Local2Global_embedding/_modules/local2global_embedding/network.html#connected_components
+     """
+    last_components = torch.full((num_nodes, ), num_nodes, dtype=torch.long, device=edge_index.device)
+    components = torch.arange(num_nodes, dtype=torch.long, device=edge_index.device)
+    while not torch.equal(last_components, components):
+        last_components[:] = components
+        components = scatter(last_components[edge_index[0]], edge_index[1], out=components, reduce='min')
+        if is_directed and connection == "weak":
+            components = scatter(last_components[edge_index[1]], edge_index[0], out=components, reduce='min')
+    component_id, inverse = torch.unique(components, return_counts=False, return_inverse=True)
+    # new_id = torch.argsort(component_size, descending=True)
+    return component_id.shape[0], inverse
+
+def sparse_components(edge_index: torch.Tensor, num_nodes: int, connection="weak", is_directed: bool = True) ->\
+        Tuple[int, torch.Tensor]:
+    if edge_index.is_cuda:
+        return sparse_components_gpu(edge_index, num_nodes, connection, is_directed)
+    else:
+        return sparse_components_scipy(edge_index, num_nodes, connection, is_directed)
 def batch_from_mask(mask: torch.Tensor, max_num_nodes: int):
     # Arange one number for each batch entry, repeat them to a [batch_size, max_num_nodes] array and apply the mask
     return torch.arange(mask.shape[0], device=mask.device)[:, None].repeat_interleave(max_num_nodes, dim=1)[mask]

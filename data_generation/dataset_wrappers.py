@@ -11,12 +11,13 @@ from data_generation.transforms import RemoveEdgeFeatures
 
 
 class DatasetWrapper(seri.ArgSerializable, abc.ABC):
-    def __init__(self, num_classes: int, num_node_features: int, args: dict,
+    def __init__(self, num_classes: int, num_node_features: int, is_directed: bool, args: dict,
                  class_names: Optional[List[str]] = None):
         super().__init__(args)
         self._dataset = None
         self.num_classes = num_classes
         self.num_node_features = num_node_features
+        self.is_directed = is_directed
         if class_names is None:
             self.class_names = [f"Class {i}" for i in range(num_classes)]
         else:
@@ -37,7 +38,7 @@ class DatasetWrapper(seri.ArgSerializable, abc.ABC):
 class CustomDatasetWrapper(DatasetWrapper, abc.ABC):
 
     def __init__(self, sampler: CustomDataset, num_samples=512 + 128):
-        super().__init__(sampler.num_classes, sampler.num_node_features,
+        super().__init__(sampler.num_classes, sampler.num_node_features, False,
                          dict(sampler=sampler, num_samples=num_samples),
                          sampler.class_names)
         self.sampler = sampler
@@ -52,10 +53,11 @@ class CustomDatasetWrapper(DatasetWrapper, abc.ABC):
 
 class PyGWrapper(DatasetWrapper, abc.ABC):
 
-    def __init__(self, dataset_class: Type[Dataset], remove_edge_fts: bool, dataset_kwargs: dict, args: dict,
-                 class_names: Optional[List[str]] = None):
+    def __init__(self, dataset_class: Type[Dataset], remove_edge_fts: bool, is_directed: bool, dataset_kwargs: dict,
+                 args: dict, class_names: Optional[List[str]] = None):
         self.dummy_dataset = dataset_class(**dataset_kwargs)
-        super().__init__(self.dummy_dataset.num_classes, self.dummy_dataset.num_node_features, args, class_names)
+        super().__init__(self.dummy_dataset.num_classes, self.dummy_dataset.num_node_features, is_directed, args,
+                         class_names)
         self.dataset_class = dataset_class
         self.dataset_kwargs = dataset_kwargs
         self.remove_edge_fts = remove_edge_fts
@@ -89,28 +91,28 @@ class PyGWrapper(DatasetWrapper, abc.ABC):
         return dataset
 
 class TUDatasetWrapper(PyGWrapper):
-    def __init__(self, dataset_name: str, remove_edge_fts: bool = False, args=None,
+    def __init__(self, dataset_name: str, is_directed: bool, remove_edge_fts: bool = False, args=None,
                  class_names: Optional[List[str]] = None):
         if args is None:
             args = dict(dataset_name=dataset_name)
-        super().__init__(TUDataset, remove_edge_fts, dict(root='/tmp', name=dataset_name), args, class_names)
+        super().__init__(TUDataset, remove_edge_fts, is_directed, dict(root='/tmp', name=dataset_name), args, class_names)
 
 class MutagWrapper(TUDatasetWrapper):
     def __init__(self, remove_edge_fts: bool = True):
-        super().__init__("MUTAG", remove_edge_fts, dict(remove_edge_fts=remove_edge_fts), ["not mutagenic", "mutagenic"])
+        super().__init__("MUTAG", False, remove_edge_fts, dict(remove_edge_fts=remove_edge_fts), ["not mutagenic", "mutagenic"])
 
 class MutagenicityWrapper(TUDatasetWrapper):
     def __init__(self, remove_edge_fts: bool = True):
-        super().__init__("Mutagenicity", remove_edge_fts, dict(remove_edge_fts=remove_edge_fts))
+        super().__init__("Mutagenicity", False, remove_edge_fts, dict(remove_edge_fts=remove_edge_fts))
 
 class RedditBinaryWrapper(TUDatasetWrapper):
     def __init__(self):
-        super().__init__("REDDIT-BINARY", dict())
+        super().__init__("REDDIT-BINARY", is_directed=False, args=dict())
 
 class EnzymesWrapper(TUDatasetWrapper):
     def __init__(self):
-        super().__init__("ENZYMES", dict())
+        super().__init__("ENZYMES", is_directed=False, args=dict())
 
 class ProteinsWrapper(TUDatasetWrapper):
     def __init__(self):
-        super().__init__("PROTEINS", dict())
+        super().__init__("PROTEINS", is_directed=False, args=dict())

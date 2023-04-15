@@ -51,7 +51,7 @@ class Analyzer():
             pass
         data.to(custom_logger.device)
         with torch.no_grad():
-            out, _, concepts, _, info = self.model(data, collect_info=True)
+            out, _, concepts, _, info = self.model(data, self.dataset_wrapper.is_directed, collect_info=True)
         y_pred = torch.argmax(out, dim=1)
         print(f"Accuracy: {100 * torch.sum(y_pred == data.y.squeeze(-1)) / y_pred.shape[0]:.2f}%")
         return data, out, concepts, info, y_pred

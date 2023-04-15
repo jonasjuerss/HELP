@@ -119,7 +119,7 @@ class CustomNet(torch.nn.Module, abc.ABC):
         """
         self.output_layer.log_custom_losses(mode, epoch, dataset_length)
 
-    def forward(self, data: Data, collect_info: bool = False):
+    def forward(self, data: Data, is_directed: bool, collect_info: bool = False):
         """
 
         :param data:
@@ -146,7 +146,7 @@ class CustomNet(torch.nn.Module, abc.ABC):
 
         concepts, probabilities, pooling_loss, pooling_assignments, pooling_activations, batch_or_mask,\
             adjs_or_edge_indices, all_batch_or_mask, input_embeddings =\
-            self.graph_network(data, collect_info=collect_info)
+            self.graph_network(data, is_directed, collect_info=collect_info)
         x = self.output_layer(self.merge_layer(input=concepts, batch_or_mask=batch_or_mask))
         if collect_info:
             info = InferenceInfo(pooling_assignments, pooling_activations, adjs_or_edge_indices, all_batch_or_mask,

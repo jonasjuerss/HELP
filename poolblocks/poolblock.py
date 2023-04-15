@@ -48,7 +48,7 @@ class PoolBlock(torch.nn.Module, abc.ABC):
         self.embedding_sizes = embedding_sizes
 
     @abc.abstractmethod
-    def forward(self, x: torch.Tensor, adj_or_edge_index: torch.Tensor, mask_or_batch=None,
+    def forward(self, x: torch.Tensor, adj_or_edge_index: torch.Tensor, is_directed: bool, mask_or_batch=None,
                 edge_weights=None):
         """
         Either takes x, adj and mask (for dense data) or x, edge_index and batch (for sparse data)
@@ -70,7 +70,7 @@ class PoolBlock(torch.nn.Module, abc.ABC):
         """
         pass
 
-    def log_assignments(self, model: CustomNet, data: Data, num_graphs_to_log: int, epoch: int):
+    def log_assignments(self, model: CustomNet, data: Data, is_directed: bool, num_graphs_to_log: int, epoch: int):
         pass
 
     def end_epoch(self):
@@ -95,7 +95,7 @@ class DenseNoPoolBlock(PoolBlock):
         self.embedding_convs = torch.nn.ModuleList([conv_type(embedding_sizes[i], embedding_sizes[i + 1])
                                                     for i in range(len(embedding_sizes) - 1)])
 
-    def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None):
+    def forward(self, x: torch.Tensor, adj: torch.Tensor, is_directed: bool, mask=None, edge_weights=None):
         if self.forced_embeddings is not None:
             x = torch.ones(x.shape[:-1] + (self.output_dim,), device=x.device) * self.forced_embeddings
         else:
@@ -125,7 +125,7 @@ class DiffPoolBlock(PoolBlock):
 
         self.cluster_colors = torch.tensor([[1., 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1], [0, 0, 0]])[None, :, :]
 
-    def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None):
+    def forward(self, x: torch.Tensor, adj: torch.Tensor, is_directed: bool, mask=None, edge_weights=None):
         """
         :param x:
         :param edge_index:
@@ -244,7 +244,7 @@ class ASAPBlock(PoolBlock):
             [211, 84, 0],
             [121, 85, 72]], dtype=torch.float)
 
-    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, batch=None, edge_weights=None):
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, is_directed: bool, batch=None, edge_weights=None):
 
         if self.forced_embeddings is None:
             for conv in self.embedding_convs:
@@ -336,7 +336,7 @@ def _calculate_local_clusters(concepts: torch.Tensor, adj: torch.Tensor, mask: t
 
     return clusters
 
-def _calculate_local_clusters_scipy(concepts: torch.Tensor, adj: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+def _calculate_local_clusters_scipy(concepts: torch.Tensor, adj: torch.Tensor, mask: torch.Tensor, is_directed: bool) -> torch.Tensor:
     """
     :param concepts: [batch_size, max_num_nodes] integer array with values in {0, ..., num_concepts - 1}
     :param adj: [batch_size, max_num_nodes, max_num_nodes]
@@ -347,7 +347,7 @@ def _calculate_local_clusters_scipy(concepts: torch.Tensor, adj: torch.Tensor, m
     """
     # [batch_size, max_num_nodes, max_num_nodes]: masking all edges between nodes of different color
     adj = torch.where(concepts[:, :, None] == concepts[:, None, :], adj, 0)
-    _, assignments = graphutils.dense_components(adj, mask)
+    _, assignments = graphutils.dense_components(adj, mask, is_directed=is_directed)
     return assignments
 
 
@@ -430,7 +430,7 @@ class PerturbedBlock(PoolBlock):
             torch.nn.ReLU(),
             torch.nn.Linear(embedding_sizes[-1], num_concepts))
 
-    def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None, num_samples=100):
+    def forward(self, x: torch.Tensor, adj: torch.Tensor, is_directed: bool, mask=None, edge_weights=None, num_samples=100):
         if self.forced_embeddings is not None:
             x = torch.ones(x.shape[:-1] + (self.num_output_features,), device=x.device) * self.forced_embeddings
         else:
@@ -459,7 +459,7 @@ class PerturbedBlock(PoolBlock):
         mask_new, _ = torch.max(mask_new.reshape(num_samples, -1, mask_new.shape[-1]), dim=0)
         return x_new, adj_new, None, None, 0, assignments, x, mask_new
 
-def _generate_assignments(x_mask, adj, mask, batch_size, max_num_nodes, soft_sampling: float, training: bool,
+def _generate_assignments(x_mask, adj, mask, is_directed, batch_size, max_num_nodes, soft_sampling: float, training: bool,
                           clustering_loss_weight: float, num_mc_samples: 1, use_global_clusters: bool,
                           cluster_alg: clustering_wrappers.ClusterAlgWrapper, parallel: bool):
     # Note: if we are not soft sampling, the samples should not have an impact here and are instead meant for the outer
@@ -507,7 +507,7 @@ def _generate_assignments(x_mask, adj, mask, batch_size, max_num_nodes, soft_sam
                                                    batch_size=batch_size * num_mc_samples,
                                                    max_num_nodes=max_num_nodes)
     # [batch_size * (num_mc_samples if soft_sampling else 1), max_num_nodes] assigns each node to a cluster. 0 for masked nodes
-    assignments = _calculate_local_clusters_scipy(concept_assignments, adj, mask.repeat(num_mc_samples, 1))
+    assignments = _calculate_local_clusters_scipy(concept_assignments, adj, mask.repeat(num_mc_samples, 1), is_directed)
 
     return assignments, concept_assignments, distances, probabilities, batch, cluster_alg.centroids.shape[0]
 
@@ -591,7 +591,7 @@ class MonteCarloBlock(PoolBlock):
             self.pool = ProcessPoolExecutor(max_workers=custom_logger.cpu_workers)
 
 
-    def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None):
+    def forward(self, x: torch.Tensor, adj: torch.Tensor, is_directed: bool, mask=None, edge_weights=None):
         """
 
         :param x:
@@ -634,8 +634,8 @@ class MonteCarloBlock(PoolBlock):
         # probabilities = None if probabilities is None else probabilities.squeeze(0)
 
 
-        generate_assignments = partial(_generate_assignments, adj=adj, mask=mask, batch_size=x.shape[0],
-                                       max_num_nodes=x.shape[1], soft_sampling=self.soft_sampling,
+        generate_assignments = partial(_generate_assignments, adj=adj, mask=mask, is_directed=is_directed,
+                                       batch_size=x.shape[0], max_num_nodes=x.shape[1], soft_sampling=self.soft_sampling,
                                        training=self.training, clustering_loss_weight=self.clustering_loss_weight,
                                        num_mc_samples=self.num_mc_samples, use_global_clusters=self.use_global_clusters,
                                        cluster_alg=self.cluster_alg)
@@ -702,7 +702,7 @@ class MonteCarloBlock(PoolBlock):
             self.cluster_colors = torch.cat((self.cluster_colors,
                                              torch.zeros(required_colors - self.cluster_colors.shape[0], 3,
                                                          device=self.cluster_colors.device)), dim=0)
-    def log_assignments(self, model: CustomNet, data: Data, num_graphs_to_log: int, epoch: int):
+    def log_assignments(self, model: CustomNet, data: Data, is_directed: bool, num_graphs_to_log: int, epoch: int):
         # TODO adjust visualizations for other graphs to new signature
         # IMPORTANT: Here it is crucial to have batches of the size used during training in the forward pass
         # if using only a single example, some concepts might not be present but we still enforce the same number of
@@ -714,7 +714,7 @@ class MonteCarloBlock(PoolBlock):
         with torch.no_grad():
             data = data.clone().detach().to(device)
             # concepts: [batch_size, max_num_nodes_final_layer, embedding_dim_out_final_layer] the node embeddings of the final graph
-            out, _, concepts, _, info = model(data, collect_info=True)
+            out, _, concepts, _, info = model(data, is_directed, collect_info=True)
             pool_activations = [data.x] + info.pooling_activations
             adjs = [data.adj] + info.adjs_or_edge_indices
             masks = [data.mask] + info.all_batch_or_mask
