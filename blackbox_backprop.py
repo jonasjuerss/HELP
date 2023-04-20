@@ -1,6 +1,6 @@
 import abc
 import math
-from typing import Callable, Tuple, Any
+from typing import Callable, Tuple, Any, Optional
 
 import torch.nn
 from torch.autograd.function import once_differentiable
@@ -167,18 +167,27 @@ class BlackBoxSkipFun(torch.autograd.Function):
 
 class BlackBoxModule(torch.nn.Module, abc.ABC):
 
-    def __init__(self, num_samples: int, noise_distr: torch.distributions.Distribution, non_batch_dims: int):
+    def __init__(self, num_samples: int, noise_distr: torch.distributions.Distribution, non_batch_dims: int,
+                 transparency: float):
         """
 
         :param num_samples: Number of monte carlo samples to take for the hyperplane approximation
         :param noise_distr: distribution to sample noise from
         :param non_batch_dims: number of dimensions that are associated with a single sample. The rest will be
             interpreted as batch dimensions
+        :param transparency: When set to 0, only the gradients approximated by the hyperplane will be used. When set to
+            1, only the gradients still flowing through the blackbox function will be used (e.g. as a baseline).
+            Values in between allow for interpolation. Note that transparency != 0 assumes there are at least some
+            gradients still flowing through the hard function (e.g. when performing clustering where there are no
+            gradients w.r.t. the cluster assignments but the new embeddings are still generetade as an average of
+            embedding vectors that require grad)
+            TODO try out decaying transparency
         """
         super().__init__()
         self.num_samples = num_samples
         self.noise_distr = noise_distr
         self.non_batch_dims = non_batch_dims
+        self.transparency = transparency
         self._full_fun = lambda x, **kwargs: self.postprocess(*self.hard_fn(x, **kwargs))
 
     @abc.abstractmethod
@@ -205,15 +214,29 @@ class BlackBoxModule(torch.nn.Module, abc.ABC):
         """
         raise NotImplementedError()
 
-    def forward(self, x: torch.Tensor, **kwargs):
+    def forward(self, x: torch.Tensor, _transparency: Optional[float] = None, **kwargs):
+        """
+
+        :param x:
+        :param _transparency: An optional transparency to replace the one from the constructor in this pass
+        :param kwargs:
+        :return:
+        """
         # We compute the hard_fn and postprocess step outside of the function to allow gradient flow into postprocess.
         # However, we detach the input of postprocess and instead return a result from our blackbox function which just
         # returns what we already calculated but will return the approximated gradients for backpropagation before this
         # module
+        if _transparency is None:
+            _transparency = self.transparency
         res_tuple = self.hard_fn(x, **kwargs)
-        final_res = self.postprocess(res_tuple[0].detach(), *res_tuple[1:])
-        return BlackBoxSkipFun.apply(x, final_res[0], self.num_samples, self.noise_distr, self.non_batch_dims,
-                                     self._full_fun, **kwargs), *final_res[1:]
+        post_in = res_tuple[0].detach() if _transparency == 0 else res_tuple[0]
+        final_res = self.postprocess(post_in, *res_tuple[1:])
+        final_res_tensor = final_res[0]
+        if _transparency != 1:
+            blackbox_res = BlackBoxSkipFun.apply(x, final_res[0], self.num_samples, self.noise_distr,
+                                                 self.non_batch_dims, self._full_fun, **kwargs)
+            final_res_tensor = final_res_tensor * _transparency + blackbox_res * (1 - _transparency)
+        return final_res_tensor, *final_res[1:]
 
 
 # class BaseHardFn(torch.autograd.Function):

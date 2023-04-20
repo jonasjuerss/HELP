@@ -81,10 +81,11 @@ def perform_clustering(x: torch.Tensor, cluster_alg: ClusterAlgWrapper, second_p
 
 class BlackboxClusterModule(BlackBoxModule):
     def __init__(self, num_samples: int, noise_std: float, cluster_alg: ClusterAlgWrapper,
-                 second_part: torch.nn.Module):
+                 second_part: torch.nn.Module, transperency: float):
         super().__init__(num_samples,
                          Normal(torch.tensor(0, dtype=torch.float, device=custom_logger.device),
-                                torch.tensor(noise_std, dtype=torch.float, device=custom_logger.device)), 2)
+                                torch.tensor(noise_std, dtype=torch.float, device=custom_logger.device)), 2,
+                         transperency)
         self.cluster_alg = cluster_alg
         self.second_part = second_part
 
@@ -111,17 +112,9 @@ class BlackboxClusterModule(BlackBoxModule):
         x_pooled = scatter(x, batch, dim=0, reduce="sum")
         return x_pooled, assignments
 
-class WhiteboxClusterModule(BlackboxClusterModule):
-    def __init__(self, num_samples: int, noise_std: float, cluster_alg: ClusterAlgWrapper,
-                 second_part: torch.nn.Module):
-        super().__init__(num_samples, noise_std, cluster_alg, second_part)
-
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        return self.postprocess(*self.hard_fn(x))
-
 class ClusterModule(torch.nn.Module):
     def __init__(self, input_dim: int, intermediate_dim: int, pool_dim: int, output_dim: int,
-                 cluster_alg: ClusterAlgWrapper, num_samples: int, noise_std: float, white_box: bool):
+                 cluster_alg: ClusterAlgWrapper, num_samples: int, noise_std: float, transperency: float):
         super().__init__()
         self.first_part = torch.nn.Sequential(
             torch.nn.Linear(input_dim, 64),
@@ -138,8 +131,7 @@ class ClusterModule(torch.nn.Module):
             torch.nn.LeakyReLU(),
             torch.nn.Linear(64, output_dim)
         )
-        self.blackbox = (WhiteboxClusterModule if white_box else BlackboxClusterModule)\
-            (num_samples, noise_std, cluster_alg, second_part)
+        self.blackbox = BlackboxClusterModule(num_samples, noise_std, cluster_alg, second_part, transperency)
         self._plot_next_embeddings = 0
         self.colors = np.array(['#f44336', '#9c27b0', '#3f51b5', '#03a9f4', '#009688', '#8bc34a', '#ffeb3b',
                                 '#ff9800', '#795548', '#607d8b', '#e91e63', '#673ab7', '#2196f3', '#00bcd4',
@@ -293,9 +285,9 @@ if __name__ == "__main__":
                         help='Standard deviation of the Gaussian noise added for blackbox differentiability.')
     parser.add_argument('--mean_shift_range', type=float, default=0.1,
                         help='Range of the mean shift clustering')
-    parser.set_defaults(white_box=False)
-    parser.add_argument('--white_box', action='store_true', dest='white_box',
-                        help='Just backpropagate through embeddings only instead of using the hyperplane approximation')
+    parser.add_argument('--blackbox_transparency', type=float, default=0,
+                        help='How much of the original gradients to use. 0 means only hyperplane approximations and 1 '
+                             'only original gradients')
     # Training
     parser.add_argument('--lr', type=float, default=0.01,
                         help='The Adam learning rate to use.')
@@ -320,7 +312,7 @@ if __name__ == "__main__":
                         help='The device to train on. Allows to use CPU or different GPUs.')
     parser.add_argument('--seed', type=int, default=1,
                         help='The seed used for pytorch.')
-    parser.add_argument('--plot_freq', type=int, default=100,
+    parser.add_argument('--plot_freq', type=int, default=20,
                         help='Frequency with which to plot the embedding space.')
 
     args = custom_logger.init(parser.parse_args())
@@ -337,7 +329,8 @@ if __name__ == "__main__":
     test_loader = DataLoader(test_set, batch_size=args.batch_size)
 
     model = ClusterModule(args.input_dim, args.intermediate_dim, args.pool_dim, dataset.num_classes,
-                          MeanShiftWrapper(args.mean_shift_range), args.num_samples, args.diff_noise_std, args.white_box)
+                          MeanShiftWrapper(args.mean_shift_range), args.num_samples, args.diff_noise_std,
+                          args.blackbox_transparency)
     model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
     torch.manual_seed(args.seed)
