@@ -19,6 +19,7 @@ from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 from torch_geometric.loader import DataLoader, DenseDataLoader
 from torch_geometric.nn import DenseGCNConv, GCNConv, DenseGINConv
+from torchviz import make_dot
 from tqdm import tqdm
 from typing import Union
 import plotly.express as px
@@ -34,12 +35,13 @@ from data_generation.custom_dataset import UniqueMotifCategorizationDataset, Cus
 from data_generation.dataset_wrappers import DatasetWrapper, CustomDatasetWrapper, TUDatasetWrapper, EnzymesWrapper
 from data_generation.deserializer import from_dict
 from data_generation.motifs import BinaryTreeMotif, HouseMotif, FullyConnectedMotif, CircleMotif
+from plot_gradient_flow import plot_grad_flow
 
 DENSE_CONV_TYPES: typing.List[typing.Type[torch.nn.Module]] = [DenseGCNConv, CustomDenseGINConv]
 SPARSE_CONV_TYPES = [GCNConv]
 VALID_CONV_NAMES = [c.__name__ for c in DENSE_CONV_TYPES + SPARSE_CONV_TYPES]
 
-def train_test_epoch(train: bool, model: CustomNet, is_directed: bool, optimizer,
+def train_test_epoch(train: bool, model: CustomNet, optimizer,
                      loader: Union[DataLoader, DenseDataLoader], epoch: int,
                      pooling_loss_weight: float, dense_data: bool, probability_weights_type: str, num_samples: int,
                      mode: str):
@@ -53,13 +55,13 @@ def train_test_epoch(train: bool, model: CustomNet, is_directed: bool, optimizer
     num_classes = model.output_layer.num_classes
     class_counts = torch.zeros(num_classes)
     with suppress() if train else torch.no_grad():  # nullcontext() would be better here but is not supported on HPC
-        for data in loader:
+        for step, data in enumerate(loader):
             data = data.to(custom_logger.device)
             batch_size = data.y.size(0)
             if train:
                 optimizer.zero_grad()
 
-            out, probabilities, _, pooling_loss, _ = model(data, is_directed)
+            out, probabilities, _, pooling_loss, _ = model(data)
             target = data.y
             if dense_data:
                 # For some reason, DataLoader flattens y (e.g. for batch_size=64 and output size 2, it would create one
@@ -95,7 +97,11 @@ def train_test_epoch(train: bool, model: CustomNet, is_directed: bool, optimizer
                 class_counts += torch.bincount(pred_classes.detach(), minlength=num_classes).cpu()
 
             if train:
+                # if epoch == 0 and step == 0:
+                #     make_dot(loss, dict(model.named_parameters())).render("img/architecture", format="pdf")
                 loss.backward()
+                # if step == 0 and epoch in [0, 1]:
+                #     plot_grad_flow(model.named_parameters(), f"img/gradientflow_{epoch}.pdf")
                 optimizer.step()
     dataset_len = len(loader.dataset) * num_samples
     model.log_custom_losses(mode, epoch, dataset_len)
@@ -271,7 +277,8 @@ def main(args, **kwargs):
     model = CustomNet(dataset_wrapper.num_node_features, dataset_wrapper.num_classes, args=args, device=device,
                       output_layer_type=output_layer,
                       pooling_block_types=pooling_block_types,
-                      conv_type=conv_type, activation_function=gnn_activation)
+                      conv_type=conv_type, activation_function=gnn_activation,
+                      directed_graphs=dataset_wrapper.is_directed)
     if restore_path is not None:
         model.load_state_dict(torch.load(restore_path))
     model.to(device)
@@ -282,23 +289,26 @@ def main(args, **kwargs):
     model_save_path_last = args.save_path + "/checkpoint_last.pt"
     save_same_acc_cooldown = 20
     last_best_save = -save_same_acc_cooldown
-    num_samples = np.prod([pb_arg.get("num_mc_samples", 1) for pb_arg in args.pool_block_args]).item()
+    if args.blackbox_transparency != 1:
+        num_samples = 1
+    else:
+        num_samples = np.prod([pb_arg.get("num_mc_samples", 1) for pb_arg in args.pool_block_args]).item()
     for epoch in tqdm(range(args.num_epochs)):
-        train_test_epoch(True, model, dataset_wrapper.is_directed, optimizer, train_loader,
+        train_test_epoch(True, model, optimizer, train_loader,
                          epoch, args.pooling_loss_weight, args.dense_data, args.probability_weights, num_samples,
                          "train")
         if epoch % args.graph_log_freq == 0:
             try:
-                model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, dataset_wrapper.is_directed, args.graphs_to_log, epoch)
+                model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, args.graphs_to_log, epoch)
             except Exception:
                 print("Error occurred while logging:")
                 traceback.print_exc()
             # log_embeddings(model, train_loader, args.dense_data, epoch, args.save_path)
         if epoch % args.formula_log_freq == 0:
             log_formulas(model, train_loader, test_loader, dataset_wrapper.class_names, epoch)
-        test_acc = train_test_epoch(False, model, dataset_wrapper.is_directed, optimizer, test_loader, epoch,
+        test_acc = train_test_epoch(False, model, optimizer, test_loader, epoch,
                                     args.pooling_loss_weight, args.dense_data, args.probability_weights, 1, "test")
-        val_acc = train_test_epoch(False, model, dataset_wrapper.is_directed, optimizer, val_loader, epoch,
+        val_acc = train_test_epoch(False, model, optimizer, val_loader, epoch,
                                    args.pooling_loss_weight, args.dense_data, args.probability_weights, 1, "val")
         if val_acc > max_val_acc or (val_acc == max_val_acc and last_best_save + save_same_acc_cooldown <= epoch):
             print(f"Saving model with validation accuracy {100*val_acc:.2f}% (test accuracy {100*test_acc:.2f}%)")
@@ -331,6 +341,10 @@ if __name__ == "__main__":
                         help='The weight of the entropy loss in the explanation layer.')
     parser.add_argument('--wd', type=float, default=5e-4,
                         help='The Adam weight decay to use.')
+    parser.add_argument('--blackbox_transparency', type=float, default=1,
+                        help='Transparency of the hyperplane gradient approximation. If 1, no hyperplane estimation is '
+                             'used, if 0, only hyperplane estimation is used and for values in between, the gradients '
+                             'are given as a weighted sum.')
     parser.add_argument('--num_epochs', type=int, default=20000,
                         help='The number of epochs to train for.')
     parser.add_argument('--batch_size', type=int, default=64,

@@ -33,12 +33,13 @@ class InferenceInfo:
 class CustomNet(torch.nn.Module, abc.ABC):
     def __init__(self, num_node_features: int, num_classes: int, args: Namespace, device,
                  output_layer_type: Type[Classifier], pooling_block_types: List[Type[PoolBlock]],
-                 conv_type: Type[torch.nn.Module], activation_function):
+                 conv_type: Type[torch.nn.Module], activation_function, directed_graphs: bool):
         super().__init__()
         layer_sizes: List[List[int]] = args.layer_sizes
         pool_block_args: List[dict] = args.pool_block_args
         self.device = device
         self.dense_data: bool = args.dense_data
+        self.directed_graphs = directed_graphs
         layer_sizes[0] = [num_node_features] + layer_sizes[0]
         # assert layer_sizes[0][0] == data.num_node_features, "Number of input features must align with input features of dataset"
 
@@ -46,8 +47,10 @@ class CustomNet(torch.nn.Module, abc.ABC):
         self.graph_network = network_type(num_node_features, layer_sizes, pool_block_args,
                                           pooling_block_types, conv_type=conv_type,
                                           use_probability_weights=args.probability_weights != "none",
+                                          directed_graphs=directed_graphs,
                                           activation_function=activation_function,
-                                          forced_embeddings=args.forced_embeddings)
+                                          forced_embeddings=args.forced_embeddings,
+                                          transparency=args.blackbox_transparency)
 
         num_output_nodes = pool_block_args[-1].get("num_output_nodes", None)
         output_dim = self.graph_network.pool_blocks[-1].output_dim
@@ -98,7 +101,8 @@ class CustomNet(torch.nn.Module, abc.ABC):
         if self.merge_layer is None:
             raise ValueError(f"Unsupported merge operation for {'dense' if args.dense_data else 'sparse'} data: "
                              f"{args.output_layer_merge}")
-
+        if args.blackbox_transparency != 1:
+            self.graph_network.set_final_merge_layer(self.merge_layer)
         self.output_layer = output_layer_type(gnn_output_shape, num_classes, device, args)
 
     def custom_losses(self, batch_size: int) -> Tensor:
@@ -119,7 +123,7 @@ class CustomNet(torch.nn.Module, abc.ABC):
         """
         self.output_layer.log_custom_losses(mode, epoch, dataset_length)
 
-    def forward(self, data: Data, is_directed: bool, collect_info: bool = False):
+    def forward(self, data: Data, collect_info: bool = False):
         """
 
         :param data:
@@ -145,9 +149,11 @@ class CustomNet(torch.nn.Module, abc.ABC):
             print("Multiple batch dimensions currently might not work as expected!")
 
         concepts, probabilities, pooling_loss, pooling_assignments, pooling_activations, batch_or_mask,\
-            adjs_or_edge_indices, all_batch_or_mask, input_embeddings =\
-            self.graph_network(data, is_directed, collect_info=collect_info)
-        x = self.output_layer(self.merge_layer(input=concepts, batch_or_mask=batch_or_mask))
+            adjs_or_edge_indices, all_batch_or_mask, input_embeddings, skipped_result =\
+            self.graph_network(data, collect_info=collect_info)
+        if skipped_result is None:
+            skipped_result = self.merge_layer(input=concepts, batch_or_mask=batch_or_mask)
+        x = self.output_layer(skipped_result)
         if collect_info:
             info = InferenceInfo(pooling_assignments, pooling_activations, adjs_or_edge_indices, all_batch_or_mask,
                                  input_embeddings)

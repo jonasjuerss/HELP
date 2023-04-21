@@ -21,6 +21,7 @@ import clustering_wrappers
 import custom_logger
 import graphutils
 import perturbations
+from blackbox_backprop import BlackBoxModule
 from custom_logger import log
 from data_generation import deserializer
 from graphutils import adj_to_edge_index
@@ -41,14 +42,15 @@ def rgb2hex_tensor(ten: torch.Tensor):
     return rgb2hex(ten[0].item(), ten[1].item(), ten[2].item())
 class PoolBlock(torch.nn.Module, abc.ABC):
     def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
-                 activation_function=F.relu, forced_embeddings=None, **kwargs):
+                 activation_function=F.relu, forced_embeddings=None, directed_graphs: bool = True, **kwargs):
         super().__init__()
         self.forced_embeddings = forced_embeddings
         self.activation_function = activation_function
         self.embedding_sizes = embedding_sizes
+        self.directed_graphs = directed_graphs
 
     @abc.abstractmethod
-    def forward(self, x: torch.Tensor, adj_or_edge_index: torch.Tensor, is_directed: bool, mask_or_batch=None,
+    def forward(self, x: torch.Tensor, adj_or_edge_index: torch.Tensor, mask_or_batch=None,
                 edge_weights=None):
         """
         Either takes x, adj and mask (for dense data) or x, edge_index and batch (for sparse data)
@@ -70,7 +72,7 @@ class PoolBlock(torch.nn.Module, abc.ABC):
         """
         pass
 
-    def log_assignments(self, model: CustomNet, data: Data, is_directed: bool, num_graphs_to_log: int, epoch: int):
+    def log_assignments(self, model: CustomNet, data: Data, num_graphs_to_log: int, epoch: int):
         pass
 
     def end_epoch(self):
@@ -95,7 +97,7 @@ class DenseNoPoolBlock(PoolBlock):
         self.embedding_convs = torch.nn.ModuleList([conv_type(embedding_sizes[i], embedding_sizes[i + 1])
                                                     for i in range(len(embedding_sizes) - 1)])
 
-    def forward(self, x: torch.Tensor, adj: torch.Tensor, is_directed: bool, mask=None, edge_weights=None):
+    def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None):
         if self.forced_embeddings is not None:
             x = torch.ones(x.shape[:-1] + (self.output_dim,), device=x.device) * self.forced_embeddings
         else:
@@ -125,7 +127,7 @@ class DiffPoolBlock(PoolBlock):
 
         self.cluster_colors = torch.tensor([[1., 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1], [0, 0, 0]])[None, :, :]
 
-    def forward(self, x: torch.Tensor, adj: torch.Tensor, is_directed: bool, mask=None, edge_weights=None):
+    def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None):
         """
         :param x:
         :param edge_index:
@@ -244,7 +246,7 @@ class ASAPBlock(PoolBlock):
             [211, 84, 0],
             [121, 85, 72]], dtype=torch.float)
 
-    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, is_directed: bool, batch=None, edge_weights=None):
+    def forward(self, x: torch.Tensor, edge_index: torch.Tenso, batch=None, edge_weights=None):
 
         if self.forced_embeddings is None:
             for conv in self.embedding_convs:
@@ -430,7 +432,7 @@ class PerturbedBlock(PoolBlock):
             torch.nn.ReLU(),
             torch.nn.Linear(embedding_sizes[-1], num_concepts))
 
-    def forward(self, x: torch.Tensor, adj: torch.Tensor, is_directed: bool, mask=None, edge_weights=None, num_samples=100):
+    def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None, num_samples=100):
         if self.forced_embeddings is not None:
             x = torch.ones(x.shape[:-1] + (self.num_output_features,), device=x.device) * self.forced_embeddings
         else:
@@ -461,10 +463,10 @@ class PerturbedBlock(PoolBlock):
 
 def _generate_assignments(x_mask, adj, mask, is_directed, batch_size, max_num_nodes, soft_sampling: float, training: bool,
                           clustering_loss_weight: float, num_mc_samples: 1, use_global_clusters: bool,
-                          cluster_alg: clustering_wrappers.ClusterAlgWrapper, parallel: bool):
+                          cluster_alg: clustering_wrappers.ClusterAlgWrapper, parallel: bool, transparency: float):
     # Note: if we are not soft sampling, the samples should not have an impact here and are instead meant for the outer
     # function which calls this one with different perturbations
-    num_mc_samples = num_mc_samples if training and soft_sampling != 0 else 1
+    num_mc_samples = num_mc_samples if training and soft_sampling != 0 and transparency == 0 else 1
     # Note that pickeling the cluster alg might not be ideal from an efficiency POV
     if not use_global_clusters:
         # Avoid copies if unnecessary
@@ -517,9 +519,10 @@ class MonteCarloBlock(PoolBlock):
         -> just sample before the discrete operation (edge generation), I guess
     """
     def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv, activation_function=F.relu,
-                 forced_embeddings=None, cluster_alg: str = "KMeans", final_bottleneck: typing.Optional[int] = None,
-                 global_clusters: bool = True, soft_sampling: float = 0, clustering_loss_weight: float = 0.0,
-                 perturbation: typing.Optional[dict] = None, num_mc_samples: int = 1, **kwargs):
+                 forced_embeddings=None, directed_graphs: bool = True, cluster_alg: str = "KMeans",
+                 final_bottleneck: typing.Optional[int] = None, global_clusters: bool = True, soft_sampling: float = 0,
+                 clustering_loss_weight: float = 0.0, perturbation: typing.Optional[dict] = None,
+                 num_mc_samples: int = 1, transparency: float = 1, **kwargs):
         """
 
         :param embedding_sizes:
@@ -534,7 +537,8 @@ class MonteCarloBlock(PoolBlock):
         on the distance from the centroid.
         :param kwargs:
         """
-        super().__init__(embedding_sizes, conv_type, activation_function, forced_embeddings, **kwargs)
+        super().__init__(embedding_sizes=embedding_sizes, conv_type=conv_type, activation_function=activation_function,
+                         forced_embeddings=forced_embeddings, directed_graphs=directed_graphs, **kwargs)
         self.embedding_convs = torch.nn.ModuleList([conv_type(embedding_sizes[i], embedding_sizes[i + 1])
                                                     for i in range(len(embedding_sizes) - 1)])
         self.num_output_features = embedding_sizes[-1]
@@ -556,13 +560,17 @@ class MonteCarloBlock(PoolBlock):
         self.clustering_loss_weight = clustering_loss_weight
         self.perturbation = None if perturbation is None else\
             typing.cast(PerturbingDistribution, deserializer.from_dict(perturbation))
+        self.transparency = transparency
 
         self.num_mc_samples = num_mc_samples
         if num_mc_samples > 1 and soft_sampling == 0 and perturbation is None:
             raise ValueError(f"Multiple monte carlo samples ({num_mc_samples} given) only make sense when sampling is "
                              f"not deterministic (soft_sampling != 0 or perturbation != None)!")
-        if soft_sampling != 0 and perturbation is not None:
-            raise ValueError("Soft sampling and perturbed inputs are not intended to be used together!")
+        if transparency != 1 and perturbation is None:
+            raise ValueError(f"A perturbation distribution must be given for hyperplane gradient estimation!")
+        if [soft_sampling != 0, perturbation is not None].count(True) > 1:
+            raise ValueError("Only one gradient approximation method (like hyperplane approximation, perturbed inputs "
+                             "and soft cluster assignments) can be used at once!")
         if self.final_bottleneck_dim:
             self.final_bottleneck = torch.nn.Linear(embedding_sizes[-1], final_bottleneck)
         else:
@@ -587,61 +595,33 @@ class MonteCarloBlock(PoolBlock):
             [255, 193, 7],
             [255, 87, 34],
             [158, 158, 158]], dtype=torch.float)
-        if self.perturbation is not None and self.num_mc_samples != 1 and custom_logger.cpu_workers > 0:
+        if self.perturbation is not None and self.num_mc_samples != 1 and self.transparency != 1 and custom_logger.cpu_workers > 0:
             self.pool = ProcessPoolExecutor(max_workers=custom_logger.cpu_workers)
 
-
-    def forward(self, x: torch.Tensor, adj: torch.Tensor, is_directed: bool, mask=None, edge_weights=None):
-        """
-
-        :param x:
-        :param adj:
-        :param mask:
-        :param edge_weights:
-        :return: IMPORTANT: the batch size will be multiplied by num_mc_samples
-        """
+    def preprocess(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None):
         if self.forced_embeddings is not None:
             x = torch.ones(x.shape[:-1] + (self.num_output_features,), device=x.device) * self.forced_embeddings
         else:
             for conv in self.embedding_convs:
                 x = self.activation_function(conv(x, adj, mask))
-        num_mc_samples = self.num_mc_samples if self.training else 1
         if self.global_clusters and self.training:
             # Only adding training data makes it impossible to generalize to new concepts during test but that's kinda
             # unlikely anyway. Alternatively one could append test embeddings but then one would need to undo those
             # changes before starting the next round of training to avoid the test data influencing the training
             self.seen_embeddings = torch.cat((self.seen_embeddings, x[mask].detach()), dim=0)
+        return x
 
-
-        # vmap won't work here because it is unable to predict the size and the controlflow depends on data
-        # generate_assigments = vmap(partial(self.generate_assignments, adj=adj, mask=mask, batch_size=x.shape[0],
-        #                                    max_num_nodes=x.shape[1]), randomness="different")
-        # if self.perturbation is None:
-        #     x_in = x[mask][None, ...]
-        # else:
-        #     x_in = self.perturbation(x[mask], self.num_mc_samples)
-        # In case the samples are generated via soft assignment, the first dimension (on which vmap is applied) will
-        # always be 1 and the number of output nodes will be multiplied by num_samples (so vmap doesn't make a difference)
-        # In case of perturbation, the first dimension will be num_samples and we merge the first 2 dimensions
-        # assignments, concept_assignments, distances, probabilities, adj, batch = generate_assigments(x_in)
-        # # [batch_size * num_mc_samples, max_num_nodes]
-        # assignments = assignments.reshape(-1, assignments.shape[2])
-        # # [batch_size * num_mc_samples, max_num_nodes]
-        # concept_assignments = concept_assignments.reshape(-1, assignments.shape[2])
-        # # [num_nodes_total, num_concepts] if soft sampling else None | Caution: here no num_samples
-        # distances = None if distances is None else distances.squeeze(0)
-        # # [num_nodes_total * num_mc_samples] if soft sampling else None
-        # probabilities = None if probabilities is None else probabilities.squeeze(0)
-
-
-        generate_assignments = partial(_generate_assignments, adj=adj, mask=mask, is_directed=is_directed,
+    def hard_fn(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None):
+        num_mc_samples = self.num_mc_samples if self.training and self.transparency == 1 else 1
+        generate_assignments = partial(_generate_assignments, adj=adj, mask=mask, is_directed=self.directed_graphs,
                                        batch_size=x.shape[0], max_num_nodes=x.shape[1], soft_sampling=self.soft_sampling,
                                        training=self.training, clustering_loss_weight=self.clustering_loss_weight,
                                        num_mc_samples=self.num_mc_samples, use_global_clusters=self.use_global_clusters,
-                                       cluster_alg=self.cluster_alg)
+                                       cluster_alg=self.cluster_alg, transparency=self.transparency)
         batch_size, max_num_nodes = x.shape[:2]
 
-        if self.num_mc_samples == 1 or self.perturbation is None:
+        if self.num_mc_samples == 1 or self.perturbation is None or self.transparency != 1:
+            # TODO I don't scale up the mask for the diff calls
             assignments, concept_assignments, distances, probabilities, batch, self.last_num_clusters =\
                 generate_assignments(x[mask].detach(), parallel=False)
         else:
@@ -694,6 +674,9 @@ class MonteCarloBlock(PoolBlock):
                 clustering_loss /= (clustering_loss.detach() / 10)
         return x_new, adj_new, None, probabilities, clustering_loss, concept_assignments, x, mask_new
 
+    def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None):
+        assert self.transparency == 1
+        return self.hard_fn(self.preprocess(x, adj, mask, edge_weights), adj, mask, edge_weights)
     def _ensure_min_colors(self, required_colors: int | torch.Tensor, purpose: str):
         if self.cluster_colors.shape[0] < required_colors:
             warnings.warn(
@@ -702,7 +685,7 @@ class MonteCarloBlock(PoolBlock):
             self.cluster_colors = torch.cat((self.cluster_colors,
                                              torch.zeros(required_colors - self.cluster_colors.shape[0], 3,
                                                          device=self.cluster_colors.device)), dim=0)
-    def log_assignments(self, model: CustomNet, data: Data, is_directed: bool, num_graphs_to_log: int, epoch: int):
+    def log_assignments(self, model: CustomNet, data: Data, num_graphs_to_log: int, epoch: int):
         # TODO adjust visualizations for other graphs to new signature
         # IMPORTANT: Here it is crucial to have batches of the size used during training in the forward pass
         # if using only a single example, some concepts might not be present but we still enforce the same number of
@@ -714,7 +697,7 @@ class MonteCarloBlock(PoolBlock):
         with torch.no_grad():
             data = data.clone().detach().to(device)
             # concepts: [batch_size, max_num_nodes_final_layer, embedding_dim_out_final_layer] the node embeddings of the final graph
-            out, _, concepts, _, info = model(data, is_directed, collect_info=True)
+            out, _, concepts, _, info = model(data, collect_info=True)
             pool_activations = [data.x] + info.pooling_activations
             adjs = [data.adj] + info.adjs_or_edge_indices
             masks = [data.mask] + info.all_batch_or_mask

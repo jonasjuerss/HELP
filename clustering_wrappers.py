@@ -93,7 +93,7 @@ def get_from_name(name: str) -> Type[ClusterAlgWrapper]:
     return globals()[name + "Wrapper"]
 
 class MeanShiftWrapper(ClusterAlgWrapper):
-    def __init__(self, range: int):
+    def __init__(self, range: float):
         super().__init__(range=range)
         self.range = range
         self._centroids = None

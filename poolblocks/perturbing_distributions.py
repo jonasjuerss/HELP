@@ -21,9 +21,12 @@ class PerturbingDistribution(ArgSerializable, abc.ABC):
         """
         return self._perturb(x.repeat(num_samples, 1))
 
-    @abc.abstractmethod
+    def sample(self, shape):
+        raise NotImplementedError(f"The perturbation {self.__class__.__name__} does not support sampling independent of"
+                                  f" input!")
+
     def _perturb(self, x: torch.Tensor):
-        pass
+        return x + self.sample(x.shape)
 class GaussianPerturbation(PerturbingDistribution):
 
     def __init__(self, std: float):
@@ -34,5 +37,5 @@ class GaussianPerturbation(PerturbingDistribution):
         self.distr = Normal(loc=torch.tensor(0.0, device=custom_logger.device),
                             scale=torch.tensor(std, device=custom_logger.device))
 
-    def _perturb(self, x: torch.Tensor):
-        return x + self.distr.sample(x.shape)
+    def sample(self, shape):
+        return self.distr.sample(shape)
