@@ -9,11 +9,13 @@ from torch.distributions import Categorical, Normal
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 from torch_scatter import scatter
+from torchviz import make_dot
 from tqdm import tqdm
 
 import custom_logger
 from blackbox_backprop import BlackBoxFun, BlackBoxModule
 from clustering_wrappers import ClusterAlgWrapper, KMeansWrapper, MeanShiftWrapper
+from plot_gradient_flow import plot_grad_flow
 
 
 class ClusterDataset():
@@ -202,7 +204,7 @@ def train_test_epoch(train: bool, model: ClusterModule, optimizer, loader: DataL
     correct = 0
     class_counts = torch.zeros(dataset.num_classes)
     with nullcontext() if train else torch.no_grad():
-        for data in loader:
+        for step, data in enumerate(loader):
             x = data["x"].to(custom_logger.device)
             y = data["y"].to(custom_logger.device)
             batch_size = y.size(0)
@@ -240,7 +242,11 @@ def train_test_epoch(train: bool, model: ClusterModule, optimizer, loader: DataL
                 print(pred_classes.shape, pred_classes)
                 print(y.shape, y)
             if train:
+                if epoch == 0 and step == 0:
+                    make_dot(loss, dict(model.named_parameters())).render("img/cluster_architecture", format="pdf")
                 loss.backward()
+                if step == 0 and epoch == 0:
+                    plot_grad_flow(model.named_parameters(), f"img/cluster_gradientflow_{epoch}.pdf")
                 optimizer.step()
     dataset_len = len(loader.dataset)  # * num_samples
     additional_dict = {}

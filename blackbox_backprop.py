@@ -1,6 +1,6 @@
 import abc
 import math
-from typing import Callable, Tuple, Any, Optional
+from typing import Callable, Tuple, Any, Optional, List
 
 import torch.nn
 from torch.autograd.function import once_differentiable
@@ -101,9 +101,10 @@ class BlackBoxFun(torch.autograd.Function):
 class BlackBoxSkipFun(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x: torch.Tensor, res: torch.Tensor, num_samples: int, noise_distr, non_batch_dims: int,
-                hard_fn: Callable[..., Tuple], **kwargs) -> torch.Tensor:
+                hard_fn: Callable[..., Tuple], repeat_kwargs: List[str], kwargs) -> torch.Tensor:
         ctx.save_for_backward(x, res)
         ctx.hard_fn = hard_fn
+        ctx.repeat_kwargs = repeat_kwargs
         ctx.kwargs = kwargs
         ctx.num_samples = num_samples
         ctx.non_batch_dims = non_batch_dims
@@ -131,31 +132,36 @@ class BlackBoxSkipFun(torch.autograd.Function):
         :returns: [batch_dims, input_dims]
         """
         if not ctx.needs_input_grad[0]:
-            return (None, ) * (6 + len(ctx.kwargs))
+            return None, grad_out, *((None, ) * 6)
         # x: [batch_dims, input_dims], out: [batch_dims, output_dims]
         x, out = ctx.saved_tensors
-        target_dim = x.ndim - ctx.non_batch_dims
-        total_batch_dim = math.prod(x.shape[:target_dim])
+        num_batch_dims = x.ndim - ctx.non_batch_dims
+        total_batch_dim = math.prod(x.shape[:num_batch_dims])
         #print(f"x: {x.shape}, out: {out.shape}, target_dim: {target_dim}, total_batch_dim: {total_batch_dim}")
+
+        kwargs = ctx.kwargs.copy()
+        for key in ctx.repeat_kwargs:
+            kwargs[key] = ctx.kwargs[key].repeat((1, ) * (num_batch_dims - 1) + (ctx.num_samples, ) +
+                                                 (1, ) * (ctx.kwargs[key].ndim - num_batch_dims))
 
         # [batch_dims, num_samples, input_dims]
         noise = ctx.noise_distr.sample(x.shape[:-ctx.non_batch_dims] + (ctx.num_samples, ) + x.shape[-ctx.non_batch_dims:])
         # [batch_dims, num_samples, input_dims]
         x_perturbed = x.unsqueeze(-ctx.non_batch_dims - 1) + noise
         #  (flatten and reshape in case hard_fn doesn't support multiple batch dimensions)
-        out_perturbed = ctx.hard_fn(x_perturbed.flatten(target_dim - 1, target_dim), **ctx.kwargs)[0]
+        out_perturbed = ctx.hard_fn(x_perturbed.flatten(num_batch_dims - 1, num_batch_dims), **kwargs)[0]
         # [batch_dims, num_samples, output_dims]
         #print(f"out_perturbed: {out_perturbed.shape}, x_perturbed: {x_perturbed.shape}, noise: {noise.shape}")
-        out_perturbed = out_perturbed.reshape(*out_perturbed.shape[:target_dim - 1], -1, ctx.num_samples, *out_perturbed.shape[target_dim:])
+        out_perturbed = out_perturbed.reshape(*out_perturbed.shape[:num_batch_dims - 1], -1, ctx.num_samples, *out_perturbed.shape[num_batch_dims:])
         #print(f"out_perturbed: {out_perturbed.shape}")
         # [batch_dims, num_samples + 1, output_dims]
-        out_perturbed = torch.cat((out.unsqueeze(target_dim), out_perturbed), dim=target_dim)
+        out_perturbed = torch.cat((out.unsqueeze(num_batch_dims), out_perturbed), dim=num_batch_dims)
         # [batch_dims, num_samples + 1, total_in_dims]
-        x_perturbed = torch.cat((x.unsqueeze(target_dim), x_perturbed), dim=target_dim).flatten(target_dim + 1)
+        x_perturbed = torch.cat((x.unsqueeze(num_batch_dims), x_perturbed), dim=num_batch_dims).flatten(num_batch_dims + 1)
         # [batch_dims, num_samples + 1, input_dims + 1] added constant 1 entries to input for bias
         x_perturbed = torch.cat((x_perturbed, torch.ones(*x_perturbed.shape[:-1], 1, device=x.device)), dim=-1)
         # [batch_dims, total_in_dims + 1, total_out_dims]
-        approx_factors = torch.linalg.lstsq(x_perturbed, out_perturbed.flatten(target_dim).reshape(*out_perturbed.shape[:target_dim + 1], -1)).solution
+        approx_factors = torch.linalg.lstsq(x_perturbed, out_perturbed.flatten(num_batch_dims).reshape(*out_perturbed.shape[:num_batch_dims + 1], -1)).solution
         # [batch_dims, total_in_dims, total_out_dims] for each batch entry and each input i: partial L / partial
         approx_factors = approx_factors[..., :-1, :]
         # [total_batch_dim, 1, total_in_dim]
@@ -163,18 +169,19 @@ class BlackBoxSkipFun(torch.autograd.Function):
             approx_factors.reshape(total_batch_dim, *approx_factors.shape[-2:]).transpose(1, 2))
         #print(grad_prod.shape)
         grad_prod = grad_prod.reshape(ctx.saved_tensors[0].shape)
-        return grad_prod, *((None, ) * (5 + len(ctx.kwargs)))
+        return grad_prod, grad_out, *((None, ) * (7 + len(ctx.kwargs)))
 
 class BlackBoxModule(torch.nn.Module, abc.ABC):
 
     def __init__(self, num_samples: int, noise_distr: torch.distributions.Distribution, non_batch_dims: int,
-                 transparency: float):
+                 transparency: float, repeat_kwargs: List[str] = [], **kwargs):
         """
 
         :param num_samples: Number of monte carlo samples to take for the hyperplane approximation
         :param noise_distr: distribution to sample noise from
-        :param non_batch_dims: number of dimensions that are associated with a single sample. The rest will be
-            interpreted as batch dimensions
+        :param non_batch_dims: number of input dimensions that are associated with a single sample. The rest will be
+            interpreted as batch dimensions. By assuming the same batch dimensions for the output, the actual number of
+            output dimensions is allowed to be different
         :param transparency: When set to 0, only the gradients approximated by the hyperplane will be used. When set to
             1, only the gradients still flowing through the blackbox function will be used (e.g. as a baseline).
             Values in between allow for interpolation. Note that transparency != 0 assumes there are at least some
@@ -182,14 +189,19 @@ class BlackBoxModule(torch.nn.Module, abc.ABC):
             gradients w.r.t. the cluster assignments but the new embeddings are still generetade as an average of
             embedding vectors that require grad)
             TODO try out decaying transparency
+        :param repeat_kwargs: key word arguments with the given names will be repeated along the batch dimension for
+            taking the monte carlo samples. It is assumed those arguments are always given and of type tensor
         """
         super().__init__()
         self.num_samples = num_samples
         self.noise_distr = noise_distr
         self.non_batch_dims = non_batch_dims
         self.transparency = transparency
+        self.repeat_kwargs = repeat_kwargs
         self._full_fun = lambda x, **kwargs: self.postprocess(*self.hard_fn(x, **kwargs))
 
+    def preprocess(self, x: torch.Tensor, **kwargs) -> Tuple:
+        return x, kwargs
     @abc.abstractmethod
     def hard_fn(self, x: torch.Tensor, **kwargs) -> Tuple:
         """
@@ -214,10 +226,12 @@ class BlackBoxModule(torch.nn.Module, abc.ABC):
         """
         raise NotImplementedError()
 
-    def forward(self, x: torch.Tensor, _transparency: Optional[float] = None, **kwargs):
+    def forward(self, x: torch.Tensor, _transparency: Optional[float] = None, _return_intermediate: bool = False, **kwargs):
         """
 
         :param x:
+        :param _return_intermediate: If True, instead of only returning the final result tuple, this will return
+            a 2-tuple of tuples where the first entry is the result of hard_fn and the second one the final result
         :param _transparency: An optional transparency to replace the one from the constructor in this pass
         :param kwargs:
         :return:
@@ -228,14 +242,21 @@ class BlackBoxModule(torch.nn.Module, abc.ABC):
         # module
         if _transparency is None:
             _transparency = self.transparency
-        res_tuple = self.hard_fn(x, **kwargs)
-        post_in = res_tuple[0].detach() if _transparency == 0 else res_tuple[0]
-        final_res = self.postprocess(post_in, *res_tuple[1:])
+        x, kwargs = self.preprocess(x, **kwargs)
+        res_tuple = self.hard_fn(x.detach() if _transparency == 0 else x, **kwargs)
+        final_res = self.postprocess(*res_tuple)
         final_res_tensor = final_res[0]
         if _transparency != 1:
-            blackbox_res = BlackBoxSkipFun.apply(x, final_res[0], self.num_samples, self.noise_distr,
-                                                 self.non_batch_dims, self._full_fun, **kwargs)
-            final_res_tensor = final_res_tensor * _transparency + blackbox_res * (1 - _transparency)
+            blackbox_res = BlackBoxSkipFun.apply(x, final_res_tensor, self.num_samples, self.noise_distr,
+                                                 self.non_batch_dims, self._full_fun, self.repeat_kwargs, kwargs)
+            if _transparency == 0:
+                final_res_tensor = blackbox_res
+            else:
+                final_res_tensor = final_res_tensor * _transparency + blackbox_res * (1 - _transparency)
+
+        if _return_intermediate:
+            return res_tuple, (final_res_tensor, *final_res[1:])
+
         return final_res_tensor, *final_res[1:]
 
 
