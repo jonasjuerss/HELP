@@ -53,7 +53,10 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer,
         sum_sample_probs = 0
     correct = 0
     num_classes = model.output_layer.num_classes
-    class_counts = torch.zeros(num_classes)
+    if True:  # mode == "val":
+        class_counts = torch.zeros(num_classes)
+    if epoch == 0:
+        class_counts_true = torch.zeros(num_classes)
     with suppress() if train else torch.no_grad():  # nullcontext() would be better here but is not supported on HPC
         for step, data in enumerate(loader):
             data = data.to(custom_logger.device)
@@ -93,8 +96,10 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer,
 
             pred_classes = out.argmax(dim=1)
             correct += int((pred_classes == target).sum())
-            if mode == "val":
+            if True: #mode == "val":
                 class_counts += torch.bincount(pred_classes.detach(), minlength=num_classes).cpu()
+            if epoch == 0:
+                class_counts_true += torch.bincount(target, minlength=num_classes).cpu()
 
             if train:
                 # if epoch == 0 and step == 0:
@@ -106,15 +111,18 @@ def train_test_epoch(train: bool, model: CustomNet, optimizer,
     dataset_len = len(loader.dataset) * num_samples
     model.log_custom_losses(mode, epoch, dataset_len)
     additional_dict = {}
-    class_counts /= dataset_len
     if mode == "train":
         additional_dict = {
             f"{mode}_loss": sum_loss / dataset_len,
             f"{mode}_pooling_loss": sum_pooling_loss / dataset_len,
             f"{mode}_classification_loss": sum_classification_loss / dataset_len,
             f"{mode}_avg_sample_prob": sum_sample_probs / dataset_len}
-    elif mode == "val":
-        additional_dict = {f"{mode}_percentage_class_{i}": class_counts[i] for i in range(num_classes)}
+    if True: #elif mode == "val":
+        class_counts /= dataset_len
+        additional_dict.update({f"{mode}_percentage_class_{i}": class_counts[i] for i in range(num_classes)})
+    if epoch == 0:
+        class_counts_true /= dataset_len
+        additional_dict.update({f"true_{mode}_percentage_class_{i}": class_counts_true[i] for i in range(num_classes)})
     log({f"{mode}_accuracy": correct / dataset_len, **additional_dict},
         step=epoch)
     model.eval()  # make sure model is always in eval by default
@@ -201,13 +209,13 @@ def main(args, **kwargs):
         run = api.run(run_path)
         save_path = args["save_path"]
         args = run.config
-        restore_path = args["save_path"] + f"/checkpoint{'_last' if args.resume_last else ''}.pt"
+        for k, v in kwargs.items():
+            args[k] = v
+        restore_path = args["save_path"] + f"/checkpoint{'_last' if args['resume_last'] else ''}.pt"
         if args["save_wandb"] and not os.path.isfile(restore_path):
             print("Downloading checkpoint from wandb...")
             wandb.restore(restore_path, run_path=run_path)
         args["save_path"] = save_path
-        for k, v in kwargs.items():
-            args[k] = v
     else:
         if not args["use_wandb"] and args["save_wandb"]:
             print("Disabling saving to wandb as logging to wandb is also disabled.")
@@ -297,31 +305,36 @@ def main(args, **kwargs):
         train_test_epoch(True, model, optimizer, train_loader,
                          epoch, args.pooling_loss_weight, args.dense_data, args.probability_weights, num_samples,
                          "train")
-        if epoch % args.graph_log_freq == 0:
-            try:
-                model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, args.graphs_to_log, epoch)
-            except Exception:
-                print("Error occurred while logging:")
-                traceback.print_exc()
-            # log_embeddings(model, train_loader, args.dense_data, epoch, args.save_path)
-        if epoch % args.formula_log_freq == 0:
-            log_formulas(model, train_loader, test_loader, dataset_wrapper.class_names, epoch)
         test_acc = train_test_epoch(False, model, optimizer, test_loader, epoch,
-                                    args.pooling_loss_weight, args.dense_data, args.probability_weights, 1, "test")
+                                    args.pooling_loss_weight, args.dense_data, args.probability_weights, 1,
+                                    "test")
         val_acc = train_test_epoch(False, model, optimizer, val_loader, epoch,
-                                   args.pooling_loss_weight, args.dense_data, args.probability_weights, 1, "val")
-        if val_acc > max_val_acc or (val_acc == max_val_acc and last_best_save + save_same_acc_cooldown <= epoch):
-            print(f"Saving model with validation accuracy {100*val_acc:.2f}% (test accuracy {100*test_acc:.2f}%)")
-            torch.save(model.state_dict(), model_save_path_best)
-            if args.save_wandb:
-                wandb.save(model_save_path_best, policy="now")
-            max_val_acc = val_acc
-            last_best_save = epoch
-            log({"best_val_acc": max_val_acc}, step=epoch)
-        if epoch % args.save_freq:
-            torch.save(model.state_dict(), model_save_path_last)
-            if args.save_wandb:
-                wandb.save(model_save_path_last, policy="now")
+                                   args.pooling_loss_weight, args.dense_data, args.probability_weights, 1,
+                                   "val")
+
+        try:
+            if epoch % args.graph_log_freq == 0:
+                model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, args.graphs_to_log, epoch)
+            if epoch % args.formula_log_freq == 0:
+                log_formulas(model, train_loader, test_loader, dataset_wrapper.class_names, epoch)
+            if val_acc > max_val_acc or (
+                    val_acc == max_val_acc and last_best_save + save_same_acc_cooldown <= epoch):
+                print(
+                    f"Saving model with validation accuracy {100 * val_acc:.2f}% (test accuracy {100 * test_acc:.2f}%)")
+                torch.save(model.state_dict(), model_save_path_best)
+                if args.save_wandb:
+                    wandb.save(model_save_path_best, policy="now")
+                max_val_acc = val_acc
+                last_best_save = epoch
+                log({"best_val_acc": max_val_acc}, step=epoch)
+            if epoch % args.save_freq:
+                torch.save(model.state_dict(), model_save_path_last)
+                if args.save_wandb:
+                    wandb.save(model_save_path_last, policy="now")
+        except Exception:
+            print("Error occurred while logging:")
+            traceback.print_exc()
+            # log_embeddings(model, train_loader, args.dense_data, epoch, args.save_path)
         model.end_epoch()
     if args.num_epochs > 0:
         if args.graph_log_freq >= 0:

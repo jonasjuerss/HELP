@@ -37,7 +37,7 @@ class DatasetWrapper(seri.ArgSerializable, abc.ABC):
 
 class CustomDatasetWrapper(DatasetWrapper, abc.ABC):
 
-    def __init__(self, sampler: CustomDataset, num_samples=512 + 128):
+    def __init__(self, sampler: CustomDataset, num_samples=4*(512 + 128)):
         super().__init__(sampler.num_classes, sampler.num_node_features, False,
                          dict(sampler=sampler, num_samples=num_samples),
                          sampler.class_names)

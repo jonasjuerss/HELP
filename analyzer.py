@@ -25,8 +25,8 @@ import custom_logger
 
 
 class Analyzer():
-    def __init__(self, wandb_id: str, train_loader: DataLoader = None, test_loader: DataLoader = None):
-        _train_loader, _val_loader, _test_loader = self.load_model(wandb_id)
+    def __init__(self, wandb_id: str, resume_last: bool, train_loader: DataLoader = None, test_loader: DataLoader = None):
+        _train_loader, _val_loader, _test_loader = self.load_model(wandb_id, resume_last)
         self.train_data, self.train_out, self.train_concepts, self.train_info, self.train_y_pred =\
             self.load_whole_dataset(_train_loader if train_loader is None else train_loader)
         self.test_data, self.test_out, self.test_concepts, self.test_info, self.test_y_pred = \
@@ -38,9 +38,10 @@ class Analyzer():
             ['#2c3e50', '#e74c3c', '#27ae60', '#3498db', '#CDDC39', '#f39c12', '#795548', '#8e44ad', '#3F51B5',
              '#7f8c8d', '#e84393', '#607D8B', '#8e44ad', '#009688'])
 
-    def load_model(self, wandb_id: str):
+    def load_model(self, wandb_id: str, resume_last: bool):
         self.model, self.config, self.dataset_wrapper, train_loader, val_loader, test_loader =\
-            main(dict(resume=wandb_id, save_path="models/dummy.pt"), use_wandb=False, num_epochs=0, shuffle=False)
+            main(dict(resume=wandb_id, save_path="models/dummy.pt"), use_wandb=False, num_epochs=0, shuffle=False,
+                 resume_last=resume_last)
         self.model.eval()
         return train_loader, val_loader, test_loader
 
@@ -51,7 +52,7 @@ class Analyzer():
             pass
         data.to(custom_logger.device)
         with torch.no_grad():
-            out, _, concepts, _, info = self.model(data, self.dataset_wrapper.is_directed, collect_info=True)
+            out, _, concepts, _, info = self.model(data, collect_info=True)
         y_pred = torch.argmax(out, dim=1)
         print(f"Accuracy: {100 * torch.sum(y_pred == data.y.squeeze(-1)) / y_pred.shape[0]:.2f}%")
         return data, out, concepts, info, y_pred
