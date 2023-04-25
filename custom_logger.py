@@ -1,4 +1,4 @@
-from typing import Optional, Any
+from typing import Optional, Any, Dict
 
 import wandb
 device = None
@@ -26,8 +26,8 @@ def log(*args, _run=None, **kwargs):
     run = wandb.run if _run is None else _run
     if run is not None:
         run.log(*args, **kwargs)
-def plot_table(vega_spec_name: str, data_table: wandb.Table, fields: dict[str, Any],
-               string_fields: Optional[dict[str, Any]] = None, _run=None, **kwargs):
+def plot_table(vega_spec_name: str, data_table: wandb.Table, fields: Dict[str, Any],
+               string_fields: Optional[Dict[str, Any]] = None, _run=None, **kwargs):
     """Creates a custom plot on a table.
 
     Arguments:
