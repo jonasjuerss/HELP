@@ -327,7 +327,7 @@ def main(args, **kwargs):
                 max_val_acc = val_acc
                 last_best_save = epoch
                 log({"best_val_acc": max_val_acc}, step=epoch)
-            if epoch % args.save_freq:
+            if epoch % args.save_freq == 0:
                 torch.save(model.state_dict(), model_save_path_last)
                 if args.save_wandb:
                     wandb.save(model_save_path_last, policy="now")
