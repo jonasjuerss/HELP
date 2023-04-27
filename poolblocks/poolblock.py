@@ -677,6 +677,7 @@ class MonteCarloBlock(PoolBlock):
     def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None):
         assert self.transparency == 1
         return self.hard_fn(self.preprocess(x, adj, mask, edge_weights), adj, mask, edge_weights)
+
     def _ensure_min_colors(self, required_colors: int | torch.Tensor, purpose: str):
         if self.cluster_colors.shape[0] < required_colors:
             warnings.warn(
@@ -735,7 +736,7 @@ class MonteCarloBlock(PoolBlock):
 
                     # Calculate feature colors
                     # [num_nodes_in_neighbourhood, num_concepts] where (i, j) gives difference between node i and concept j
-                    feature_colors = torch.cdist(pool_activations[pool_step][graph_i, masks[pool_step][graph_i]],
+                    feature_colors = torch.cdist(input_embeddings[pool_step][graph_i, masks[pool_step][graph_i]],
                                                  centroids[pool_step])
                     self._ensure_min_colors(feature_colors.shape[1], "features")
                     feature_colors = torch.sum(torch.nn.functional.softmin(feature_colors / TEMPERATURE, dim=1)[:, :, None].cpu() *
@@ -785,7 +786,7 @@ class MonteCarloBlock(PoolBlock):
                                                                   num_nodes=nodes_in_cur_graph)
 
                         # [num_nodes_in_neighbourhood, num_concepts] where (i, j) gives difference between node i and concept j
-                        distances = torch.cdist(pool_activations[pool_step][sample, masks[pool_step][sample]][subset],
+                        distances = torch.cdist(input_embeddings[pool_step][sample, masks[pool_step][sample]][subset],
                                                 centroids[pool_step])
                         if distances.shape[1] > self.cluster_colors.shape[0]:
                             raise ValueError(f"Cannot visualize {distances.shape[1]} using "
