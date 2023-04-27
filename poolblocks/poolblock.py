@@ -777,10 +777,12 @@ class MonteCarloBlock(PoolBlock):
                         if samples_seen >= SAMPLES_PER_CONCEPT:
                             break
                         edge_index_prev, _, _ = adj_to_edge_index(adjs[pool_step][sample])
-                        subset, edge_index, _, _ = k_hop_subgraph(node.item(), len(self.embedding_convs),
+                        edge_index_prev = edge_index_prev[:, assignment[sample, edge_index_prev[0, :]] == assignment[sample, edge_index_prev[1, :]]]
+                        nodes_in_cur_graph = torch.sum(masks[pool_step][sample]).item()
+                        subset, edge_index, _, _ = k_hop_subgraph(node.item(), nodes_in_cur_graph,
                                                                   edge_index_prev,
                                                                   relabel_nodes=True,
-                                                                  num_nodes=torch.sum(masks[pool_step][sample]).item())
+                                                                  num_nodes=nodes_in_cur_graph)
 
                         # [num_nodes_in_neighbourhood, num_concepts] where (i, j) gives difference between node i and concept j
                         distances = torch.cdist(pool_activations[pool_step][sample, masks[pool_step][sample]][subset],
