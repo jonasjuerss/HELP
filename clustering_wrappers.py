@@ -5,13 +5,14 @@ import math
 from typing import Union, Optional, Type
 
 import torch
-from fast_pytorch_kmeans import KMeans
+from kmeans import KMeans
 
 
 class ClusterAlgWrapper(abc.ABC):
 
     def __init__(self, **kwargs):
         self.kwargs = kwargs
+
     def fit_predict(self, X: torch.Tensor) -> torch.Tensor:
         """
 
@@ -21,7 +22,6 @@ class ClusterAlgWrapper(abc.ABC):
         """
         self.fit(X)
         return self.predict(X)
-
 
     def predict(self, X: torch.Tensor) -> torch.Tensor:
         if self.centroids is None:
@@ -44,19 +44,23 @@ class ClusterAlgWrapper(abc.ABC):
         res = self.__class__(**self.kwargs)
         res.fit(X)
         return res
+
     @property
     @abc.abstractmethod
     def centroids(self) -> torch.Tensor:
         pass
+
 
 class KMeansWrapper(ClusterAlgWrapper):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # For backward compatibility:
-        if "num_concepts" in kwargs:
-            kwargs["n_clusters"] = kwargs["num_concepts"]
-            del kwargs["num_concepts"]
+        kwargs_map = dict(num_concepts="n_clusters", kmeans_threshold="threshold")
+        for k, v in kwargs_map.items():
+            if k in kwargs:
+                kwargs[v] = kwargs[k]
+                del kwargs[k]
         self.kmeans = KMeans(**kwargs)
 
     def fit(self, X: torch.Tensor) -> None:

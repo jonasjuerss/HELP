@@ -67,7 +67,7 @@ def sparse_components_scipy(edge_index: torch.Tensor, num_nodes: int, connection
     num_components, component = sp.csgraph.connected_components(adj, connection=connection)
     return num_components, torch.tensor(component, device=custom_logger.device)
 
-def dense_components(adj: torch.Tensor, mask: Optional[torch.Tensor], connection="weak", is_directed: bool = True):
+def dense_components(adj: torch.Tensor, mask: Optional[torch.Tensor] = None, connection="weak", is_directed: bool = True):
     """
 
     :param adj: [max_num_nodes, max_num_nodes] or [batch_size, max_num_nodes, max_num_nodes]
@@ -90,7 +90,7 @@ def dense_components(adj: torch.Tensor, mask: Optional[torch.Tensor], connection
     # Whereas we initialized the masked components as -1, they became smaller in later batch elements as we subtracted
     # the start component. So we fix this here.
     dense_component = torch.maximum(dense_component, torch.tensor([0], device=custom_logger.device))
-    return dense_component.shape[1], dense_component
+    return dense_component
 
 def sparse_components_gpu(edge_index: torch.Tensor, num_nodes: int, connection="weak", is_directed: bool = True) ->\
         Tuple[int, torch.Tensor]:

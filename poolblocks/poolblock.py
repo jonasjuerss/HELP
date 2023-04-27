@@ -349,7 +349,7 @@ def _calculate_local_clusters_scipy(concepts: torch.Tensor, adj: torch.Tensor, m
     """
     # [batch_size, max_num_nodes, max_num_nodes]: masking all edges between nodes of different color
     adj = torch.where(concepts[:, :, None] == concepts[:, None, :], adj, 0)
-    _, assignments = graphutils.dense_components(adj, mask, is_directed=is_directed)
+    assignments = graphutils.dense_components(adj, mask, is_directed=is_directed)
     return assignments
 
 
@@ -466,7 +466,7 @@ def _generate_assignments(x_mask, adj, mask, is_directed, batch_size, max_num_no
                           cluster_alg: clustering_wrappers.ClusterAlgWrapper, parallel: bool, transparency: float):
     # Note: if we are not soft sampling, the samples should not have an impact here and are instead meant for the outer
     # function which calls this one with different perturbations
-    num_mc_samples = num_mc_samples if training and soft_sampling != 0 and transparency == 0 else 1
+    num_mc_samples = num_mc_samples if training and (soft_sampling != 0 or transparency == 0) else 1
     # Note that pickeling the cluster alg might not be ideal from an efficiency POV
     if not use_global_clusters:
         # Avoid copies if unnecessary
