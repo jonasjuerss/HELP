@@ -315,6 +315,9 @@ def main(args, **kwargs):
         try:
             if epoch % args.graph_log_freq == 0:
                 model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, args.graphs_to_log, epoch)
+            for i, block in enumerate(model.graph_network.pool_blocks):
+                block.log_data(epoch, i)
+
             if epoch % args.formula_log_freq == 0:
                 log_formulas(model, train_loader, test_loader, dataset_wrapper.class_names, epoch)
             if val_acc > max_val_acc or (

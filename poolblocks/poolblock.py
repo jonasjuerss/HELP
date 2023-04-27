@@ -34,12 +34,16 @@ from poolblocks.perturbing_distributions import PerturbingDistribution
 if TYPE_CHECKING:
     from custom_net import CustomNet
 
+
 def rgb2hex(r: int, g: int, b: int):
     return f'#{r:02x}{g:02x}{b:02x}'
+
 
 def rgb2hex_tensor(ten: torch.Tensor):
     ten = torch.round(ten).to(int)
     return rgb2hex(ten[0].item(), ten[1].item(), ten[2].item())
+
+
 class PoolBlock(torch.nn.Module, abc.ABC):
     def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
                  activation_function=F.relu, forced_embeddings=None, directed_graphs: bool = True, **kwargs):
@@ -70,6 +74,9 @@ class PoolBlock(torch.nn.Module, abc.ABC):
         - old_embeddings: Embeddings that went into the pooling operation
         - batch_or_mask
         """
+        pass
+
+    def log_data(self, epoch: int, index: int):
         pass
 
     def log_assignments(self, model: CustomNet, data: Data, num_graphs_to_log: int, epoch: int):
@@ -686,6 +693,10 @@ class MonteCarloBlock(PoolBlock):
             self.cluster_colors = torch.cat((self.cluster_colors,
                                              torch.zeros(required_colors - self.cluster_colors.shape[0], 3,
                                                          device=self.cluster_colors.device)), dim=0)
+
+    def log_data(self, epoch: int, index: int):
+        log({f"num_clusters_{index}": self.last_num_clusters}, step=epoch)
+
     def log_assignments(self, model: CustomNet, data: Data, num_graphs_to_log: int, epoch: int):
         # TODO adjust visualizations for other graphs to new signature
         # IMPORTANT: Here it is crucial to have batches of the size used during training in the forward pass
@@ -722,8 +733,6 @@ class MonteCarloBlock(PoolBlock):
                           f"{100 * torch.sum(hard_assignments == arg_max) / arg_max.shape[0]:.2f}% of the soft maxima "
                           f"agreeing with the hard assignment")
 
-                if isinstance(pool_block.cluster_alg, clustering_wrappers.MeanShiftWrapper):
-                    log({"num_clusters": pool_block.last_num_clusters}, step=epoch)
             ############################## Log Graphs ##############################
             for graph_i in range(num_graphs_to_log):
                 for pool_step, assignment in enumerate(pool_assignments):
