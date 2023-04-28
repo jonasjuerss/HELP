@@ -11,7 +11,8 @@ from torch_geometric.nn import DenseGCNConv
 from blackbox_backprop import BlackBoxModule
 from poolblocks.poolblock import PoolBlock, MonteCarloBlock
 
-def wrap_pool_block_list(pool_blocks: List[PoolBlock], transparency: float, merge_layer: Callable) ->\
+
+def wrap_pool_block_list(pool_blocks: List[PoolBlock], transparency: float, merge_layer: Callable) -> \
         List[PoolBlock | DifferentiablePoolingNet]:
     res = []
     for i, block in enumerate(pool_blocks):
@@ -21,6 +22,7 @@ def wrap_pool_block_list(pool_blocks: List[PoolBlock], transparency: float, merg
             break
         res.append(block)
     return res
+
 
 # Other example: https://github.com/pyg-team/pytorch_geometric/blob/master/examples/proteins_diff_pool.py
 class GraphPoolingNetwork(torch.nn.Module, abc.ABC):
@@ -38,29 +40,37 @@ class GraphPoolingNetwork(torch.nn.Module, abc.ABC):
                              f" of pooling block arguments provided ({len(pool_block_args)})!")
         self.layer_sizes = layer_sizes
         self.directed_graphs = directed_graphs
-        self.pool_blocks = torch.nn.ModuleList()
+        self._pool_blocks = torch.nn.ModuleList()
         for i in range(len(pool_block_args)):
-            self.pool_blocks.append(pooling_block_types[i](embedding_sizes=layer_sizes[i],
-                                                           conv_type=conv_type,
-                                                           activation_function=activation_function,
-                                                           forced_embeddings=forced_embeddings,
-                                                           directed_graphs=directed_graphs,
-                                                           transparency=transparency,
-                                                           **pool_block_args[i]))
+            self._pool_blocks.append(pooling_block_types[i](embedding_sizes=layer_sizes[i],
+                                                            conv_type=conv_type,
+                                                            activation_function=activation_function,
+                                                            forced_embeddings=forced_embeddings,
+                                                            directed_graphs=directed_graphs,
+                                                            transparency=transparency,
+                                                            **pool_block_args[i]))
         for i in range(len(pool_block_args) - 1):
-            if self.pool_blocks[i].output_dim != self.pool_blocks[i + 1].input_dim:
+            if self._pool_blocks[i].output_dim != self._pool_blocks[i + 1].input_dim:
                 raise ValueError("Each block must end in the same number of features as the next one has!")
-        self.num_concepts = self.pool_blocks[-1].output_dim
+        self.num_concepts = self._pool_blocks[-1].output_dim
         self.use_probability_weights = use_probability_weights
         self.transparency = transparency
 
     def set_final_merge_layer(self, merge_layer: Callable):
-        self.pool_blocks = torch.nn.ModuleList(wrap_pool_block_list(self.pool_blocks, self.transparency, merge_layer))
+        self._pool_blocks = torch.nn.ModuleList(wrap_pool_block_list(self._pool_blocks, self.transparency, merge_layer))
 
     @abc.abstractmethod
     def forward(self, data: Data, collect_info=False):
         pass
 
+    @property
+    def pool_blocks(self) -> List[PoolBlock]:
+        blocks = []
+        for block in self._pool_blocks:
+            if block.__class__ == DifferentiablePoolingNet:
+                return blocks + list(block.pool_blocks)
+            blocks.append(block)
+        return blocks
 
 class DifferentiablePoolingNet(BlackBoxModule):
     def __init__(self, num_samples: int, noise_distr: torch.distributions.Distribution,
@@ -77,29 +87,42 @@ class DifferentiablePoolingNet(BlackBoxModule):
         return self.pool_blocks[0].hard_fn(x, **kwargs)
 
     def postprocess(self, x, adj, _, __, ___, ____, _____, mask) -> Tuple:
-        for block in self.pool_blocks[1:]:
-            x, adj, _, _, _, _, _, mask = block(x, adj, mask)
-        return self.merge_layer(input=x, batch_or_mask=mask),
+        results = []
+        for i, block in enumerate(self.pool_blocks[1:]):
+            if block.__class__ == DifferentiablePoolingNet:
+                assert i == len(self.pool_blocks) - 2
+                final_res, following_results = block(x, adj=adj, mask=mask)
+                return final_res, results + following_results
+            else:
+                res = block(x, adj=adj, mask=mask)
+                x, adj, _, _, _, _, _, mask = res
+        return self.merge_layer(input=x, batch_or_mask=mask), results
 
     def forward(self, *args, **kwargs):
-        return super().forward(*args, _return_intermediate=True, **kwargs)
+        block_res, (final_res, intermediate_res) = super().forward(*args, _return_intermediate=True, **kwargs)
+        return final_res, [block_res] + intermediate_res
 
     def log_assignments(self, *args, **kwargs):
         for block in self.pool_blocks:
             block.log_assignments(*args, **kwargs)
+
+    def log_data(self, *args, **kwargs):
+        for block in self.pool_blocks:
+            block.log_data(*args, **kwargs)
 
     def end_epoch(self):
         for block in self.pool_blocks:
             block.end_epoch()
 
     def __getattr__(self, item):
-        if item in ["cluster_alg", "last_num_clusters"]:
+        if item in ["cluster_alg", "last_num_clusters", "pooling_assignments"]:
             return getattr(self.pool_blocks[0], item)
         return super().__getattr__(item)
         # Would be cleaner but doesn't work because of the way torch.nn.Module overrides __getattr__
         # if (item.startswith('__') and item.endswith('__')):
         #     return super().__getattr__(item)
         # return getattr(self.pool_blocks[0], item)
+
 
 class DenseGraphPoolingNetwork(GraphPoolingNetwork):
     def __init__(self, num_node_features: int, layer_sizes: List[List[int]],
@@ -108,8 +131,7 @@ class DenseGraphPoolingNetwork(GraphPoolingNetwork):
                  directed_graphs: bool, activation_function=torch.nn.functional.relu,
                  forced_embeddings: float = None, transparency: float = 1):
         super().__init__(num_node_features, layer_sizes, pool_block_args, pooling_block_types, conv_type,
-                         use_probability_weights, directed_graphs , activation_function, forced_embeddings, transparency)
-
+                         use_probability_weights, directed_graphs, activation_function, forced_embeddings, transparency)
 
     def forward(self, data: Data, collect_info=False):
         x, adj, mask = data.x, data.adj, data.mask  # to_dense_adj(data.edge_index)
@@ -126,24 +148,30 @@ class DenseGraphPoolingNetwork(GraphPoolingNetwork):
 
         # TODO incorporate in sparse or finally merge them
         skipped_result = None
-        for block in self.pool_blocks:
+        results = []
+        for i, block in enumerate(self._pool_blocks):
             if block.__class__ == DifferentiablePoolingNet:
-                res, skipped_res = block(x, adj=adj, mask=mask)
-                if skipped_result is None:
-                    skipped_result = skipped_res[0]
+                assert i == len(self._pool_blocks) - 1
+                skipped_res, res = block(x, adj=adj, mask=mask)
+                results += res
+                skipped_result = skipped_res
             else:
                 res = block(x, adj=adj, mask=mask)
-            x, adj, _, probs, temp_loss, pool, last_embedding, mask = res
+                x, adj, _, probs, temp_loss, pool, last_embedding, mask = res
+                results.append(res)
+
+        for res in results:
+            x_tmp, adj, _, probs, temp_loss, pool, last_embedding, mask = res
             pooling_loss += temp_loss
             if collect_info:
                 pooling_assignments.append(pool)
                 pooling_activations.append(last_embedding)
                 masks.append(mask)
                 adjs.append(adj)
-                input_embeddings.append(x)
+                input_embeddings.append(x_tmp)
             if self.use_probability_weights and probs is not None:
                 probabilities = probs if probabilities is None else probabilities * probs
-        return x, probabilities, pooling_loss, pooling_assignments, pooling_activations, mask, adjs, masks,\
+        return x, probabilities, pooling_loss, pooling_assignments, pooling_activations, mask, adjs, masks, \
             input_embeddings, skipped_result
 
 
@@ -151,7 +179,8 @@ class SparseGraphPoolingNetwork(GraphPoolingNetwork):
     def __init__(self, num_node_features: int, layer_sizes: List[List[int]],
                  pool_block_args: List[dict], pooling_block_types: List[Type[PoolBlock]],
                  conv_type: Type[torch.nn.Module], use_probability_weights: bool, directed_graphs: bool,
-                 activation_function=torch.nn.functional.relu, forced_embeddings: float = None, transparency: float = 1):
+                 activation_function=torch.nn.functional.relu, forced_embeddings: float = None,
+                 transparency: float = 1):
         super().__init__(num_node_features, layer_sizes, pool_block_args, pooling_block_types, conv_type,
                          use_probability_weights, directed_graphs, activation_function, forced_embeddings, transparency)
 
@@ -182,5 +211,5 @@ class SparseGraphPoolingNetwork(GraphPoolingNetwork):
                 input_embeddings.append(x)
             if self.use_probability_weights and probs is not None:
                 probabilities = probs if probabilities is None else probabilities * probs
-        return x, probabilities, pooling_loss, pooling_assignments, pooling_activations, batch, edge_indices, batches,\
+        return x, probabilities, pooling_loss, pooling_assignments, pooling_activations, batch, edge_indices, batches, \
             input_embeddings

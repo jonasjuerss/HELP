@@ -817,9 +817,6 @@ class MonteCarloBlock(PoolBlock):
                     f"concept_edge_table_{concept}": edge_table
                 }, step=epoch)
 
-
-
-
     def end_epoch(self):
         if not self.global_clusters:
             return
@@ -831,6 +828,7 @@ class MonteCarloBlock(PoolBlock):
     def output_dim(self):
         return self.embedding_sizes[-1] if self.final_bottleneck_dim is None else self.final_bottleneck_dim
 
+
 __all_dense__ = [DenseNoPoolBlock, DiffPoolBlock, PerturbedBlock, MonteCarloBlock]
 __all_sparse__ = [ASAPBlock]
 
@@ -840,6 +838,7 @@ def from_name(name: str, dense_data: bool):
         if b.__name__ == name + "Block":
             return b
     raise ValueError(f"Unknown pooling type {name} for dense_data={dense_data}!")#
+
 
 def valid_names() -> List[str]:
     return [b.__name__[:-5] for b in __all_dense__] + [b.__name__[:-5] for b in __all_sparse__]

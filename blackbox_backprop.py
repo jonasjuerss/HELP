@@ -202,6 +202,7 @@ class BlackBoxModule(torch.nn.Module, abc.ABC):
 
     def preprocess(self, x: torch.Tensor, **kwargs) -> Tuple:
         return x, kwargs
+
     @abc.abstractmethod
     def hard_fn(self, x: torch.Tensor, **kwargs) -> Tuple:
         """
