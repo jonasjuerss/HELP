@@ -13,7 +13,8 @@ def init(args):
             project=wandb_project,
             entity=wandb_entity,
             dir="/tmp/thesis",
-            config=args
+            config=args,
+            tags=[args.dataset["_type"][:-7]]
         )
         if args.wandb_name is not None:
             wandb_args["name"] = args.wandb_name
