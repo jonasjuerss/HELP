@@ -221,7 +221,8 @@ class KMeans:
                 break
 
         if self.threshold != 0:
-            merge_mask = torch.cdist(self.centroids, self.centroids) < self.threshold
+            centroid_dists = torch.cdist(self.centroids, self.centroids)
+            merge_mask = centroid_dists < self.threshold * torch.max(centroid_dists)
             # Note: there might be chains of centroids a-b-c, where dist(a, b), dist(b, c) < threshold,
             # but dist(a, c) > threshold. We decide to merge those by perfomring a connected component search on a graph
             # where there is an edge between 2 clusters iff. they are closer than the threshold.
