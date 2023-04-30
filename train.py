@@ -292,7 +292,7 @@ def main(args, **kwargs):
                       conv_type=conv_type, activation_function=gnn_activation,
                       directed_graphs=dataset_wrapper.is_directed)
     if restore_path is not None:
-        model.load_state_dict(torch.load(restore_path))
+        model.load_state_dict(torch.load(restore_path, map_location=device))
     model.to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
