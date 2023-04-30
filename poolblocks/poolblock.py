@@ -485,7 +485,7 @@ def _generate_assignments(x_mask, adj, mask, is_directed, batch_size, max_num_no
     if (soft_sampling != 0 and training) or clustering_loss_weight != 0:
         # https://ai.stackexchange.com/questions/13776/how-is-reinforce-used-instead-of-backpropagation
         # [num_nodes_total, num_concepts] (centroids: [num_concepts, embedding_size])
-        distances = torch.cdist(x_mask, cluster_alg.centroids)
+        distances = torch.cdist(x_mask, cluster_alg.centroids.detach())
     else:
         distances = None
     batch = graphutils.batch_from_mask(mask, max_num_nodes)
@@ -717,7 +717,7 @@ class MonteCarloBlock(PoolBlock):
             pool_assignments = [info.pooling_assignments[i] for i in range(len(info.pooling_assignments))
                                 if not isinstance(model.graph_network.pool_blocks[i], DenseNoPoolBlock)]
             centroids = [torch.eye(data.x.shape[-1], device=custom_logger.device)] + \
-                        [pb.cluster_alg.centroids if hasattr(pb, "cluster_alg") else None for pb in model.graph_network.pool_blocks]
+                        [pb.cluster_alg.centroids.detach() if hasattr(pb, "cluster_alg") else None for pb in model.graph_network.pool_blocks]
 
             ############################## Print Probability Distributions #########
             for pool_step in range(len(pool_assignments)):

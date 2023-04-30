@@ -5,6 +5,10 @@ import math
 from typing import Union, Optional, Type
 
 import torch
+from torch_scatter import scatter
+
+import custom_logger
+import graphutils
 from kmeans import KMeans
 
 
@@ -38,7 +42,7 @@ class ClusterAlgWrapper(abc.ABC):
     def fit_copy(self, X: torch.Tensor) -> ClusterAlgWrapper:
         """
         Used to avoid problems when calling fit() in parallel.
-        By default creates a copy using the kwargs given to the super construcor and fits it to the given points.
+        By default creates a copy using the kwargs given to the super constructor and fits it to the given points.
         Can be overwritten by subclasses e.g. for efficiency where necessary.
         """
         res = self.__class__(**self.kwargs)
@@ -56,7 +60,7 @@ class KMeansWrapper(ClusterAlgWrapper):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # For backward compatibility:
-        kwargs_map = dict(num_concepts="n_clusters", kmeans_threshold="threshold")
+        kwargs_map = dict(num_concepts="n_clusters", kmeans_threshold="threshold", cluster_threshold="threshold")
         for k, v in kwargs_map.items():
             if k in kwargs:
                 kwargs[v] = kwargs[k]
@@ -96,6 +100,7 @@ class KMeansWrapper(ClusterAlgWrapper):
 def get_from_name(name: str) -> Type[ClusterAlgWrapper]:
     return globals()[name + "Wrapper"]
 
+
 class MeanShiftWrapper(ClusterAlgWrapper):
     def __init__(self, range: float):
         super().__init__(range=range)
@@ -126,3 +131,59 @@ class MeanShiftWrapper(ClusterAlgWrapper):
     @property
     def centroids(self) -> torch.Tensor:
         return self._centroids
+
+
+class LearnableCentroidsWrapper(torch.nn.Module, ClusterAlgWrapper):
+
+    def __init__(self, num_concepts: int, cluster_threshold: float, centroids_init_std: Optional[float] = None,
+                 centroids_init_range: Optional[float] = None):
+        super().__init__()
+        self.num_centroids = num_concepts
+        self.cluster_threshold = cluster_threshold
+        self.init_std = centroids_init_std
+        self.init_range = centroids_init_range
+        if [centroids_init_std, centroids_init_range].count(None) != 1:
+            raise ValueError("Exactly one of the cluster initialization parameters std and range has to be given!")
+        self.centroids_dirty = True
+        self._centroids = None
+
+    def fit(self, X: torch.Tensor) -> None:
+        if self._centroids is None:
+            if self.init_range is None:
+                init = self.init_std * torch.randn(self.num_centroids, X.shape[1], device=custom_logger.device)
+            else:
+                init = (torch.rand(self.num_centroids, X.shape[1], device=custom_logger.device) - 0.5) *\
+                       (2 * self.init_range)
+            self._centroids = torch.nn.Parameter(init)
+
+            if self.cluster_threshold != 0:
+                def hook_fn(x):
+                    self.centroids_dirty = True
+                    return x
+                self._centroids.register_hook(hook_fn)
+
+    def predict(self, X: torch.Tensor) -> torch.Tensor:
+        return torch.argmin(torch.cdist(X, self.centroids), dim=-1)
+
+    def fit_copy(self, X: torch.Tensor) -> ClusterAlgWrapper:
+        raise NotImplementedError()
+
+    @ClusterAlgWrapper.centroids.getter
+    def centroids(self) -> torch.Tensor:
+        if self.cluster_threshold == 0:
+            return self._centroids
+
+        if self.centroids_dirty:
+            centroid_dists = torch.cdist(self._centroids, self._centroids)
+            merge_mask = centroid_dists < self.cluster_threshold * torch.max(centroid_dists)
+            # Note: there might be chains of centroids a-b-c, where dist(a, b), dist(b, c) < threshold,
+            # but dist(a, c) > threshold. We decide to merge those by performing a connected component search on a graph
+            # where there is an edge between 2 clusters iff. they are closer than the threshold.
+            # [num_clusters] with values in [0, num_merged_clusters - 1]
+            assignments = graphutils.dense_components(merge_mask[None, :, :],
+                                                      torch.ones(self.num_centroids, dtype=torch.bool,
+                                                                 device=custom_logger.device)[None, :],
+                                                      is_directed=False).squeeze(0) - 1
+            self.merged_centroids = scatter(self._centroids, assignments, dim=-2, reduce="mean")
+            self.centroids_dirty = False
+        return self.merged_centroids
