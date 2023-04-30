@@ -291,11 +291,24 @@ def main(args, **kwargs):
                       pooling_block_types=pooling_block_types,
                       conv_type=conv_type, activation_function=gnn_activation,
                       directed_graphs=dataset_wrapper.is_directed)
+
+    optimizer_params = None
     if restore_path is not None:
-        model.load_state_dict(torch.load(restore_path, map_location=device))
+        state_dict = torch.load(restore_path, map_location=device)
+        if "model" in state_dict and "optimizer" in state_dict and len(state_dict) == 2:
+            model.load_state_dict(state_dict["model"])
+            optimizer_params = state_dict["optimizer"]
+            print("Warning: resuming a training run is equivalent to continuing the same run in expectation but may"
+                  " not give the same result deterministically due to the reset of the random seed.")
+        else:
+            print("Warning: optimizer state was not saved. "
+                  "Resuming training will not be equivalent to letting it run.")
+            model.load_state_dict(state_dict)  # Backward compatibility
     model.to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
+    if optimizer_params is not None:
+        optimizer.load_state_dict(optimizer_params)
     max_val_acc = 0
     model_save_path_best = args.save_path + "/checkpoint.pt"
     model_save_path_last = args.save_path + "/checkpoint_last.pt"
@@ -328,14 +341,14 @@ def main(args, **kwargs):
                     val_acc == max_val_acc and last_best_save + save_same_acc_cooldown <= epoch):
                 print(
                     f"Saving model with validation accuracy {100 * val_acc:.2f}% (test accuracy {100 * test_acc:.2f}%)")
-                torch.save(model.state_dict(), model_save_path_best)
+                torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict()}, model_save_path_best)
                 if args.save_wandb:
                     wandb.save(model_save_path_best, policy="now")
                 max_val_acc = val_acc
                 last_best_save = epoch
                 log({"best_val_acc": max_val_acc, "test_at_best_val_acc": test_acc}, step=epoch)
             if epoch % args.save_freq == 0:
-                torch.save(model.state_dict(), model_save_path_last)
+                torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict()}, model_save_path_best)
                 if args.save_wandb:
                     wandb.save(model_save_path_last, policy="now")
         except Exception:
