@@ -246,6 +246,10 @@ def main(args, **kwargs):
     device = torch.device(args.device)
     custom_logger.device = device
     custom_logger.cpu_workers = args.cpu_workers
+    default_num_threads = torch.get_num_threads()
+    if getattr(args, "num_threads", 0) > 0:
+        torch.set_num_threads(args.num_threads)
+    print(f"Default number of threads: {default_num_threads}, using {torch.get_num_threads()}!")
 
 
     dataset_wrapper = typing.cast(DatasetWrapper, from_dict(args.dataset))
@@ -441,6 +445,8 @@ if __name__ == "__main__":
     parser.add_argument('--cpu_workers', type=int, default=0,
                         help='How many workers to spawn for cpu parallelization (like for clustering). '
                              'If 0, everything will happen in the main process.')
+    parser.add_argument('--num_threads', type=int, default=0,
+                        help='Overwrites pytorch\'s num threads if > 0.')
     parser.add_argument('--save_path', type=str,
                         default=os.path.join("models", datetime.now().strftime("%d-%m-%Y_%H-%M-%S")),
                         help='The path to save the checkpoint to. Will be models/dd-mm-YY_HH-MM-SS.pt by default.')
@@ -461,5 +467,9 @@ if __name__ == "__main__":
     parser.add_argument('--resume_best', dest='resume_last', action='store_false')
     parser.set_defaults(resume_last=False)
 
-    main(parser.parse_args())
+    parser.add_argument('--overwrite_params', type=parse_json_str, default={},
+                        help="A json with parameters to overwrite from the resumed run.")
+
+    args = parser.parse_args()
+    main(args, **args.overwrite_params)
 
