@@ -7,6 +7,7 @@ from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from typing import List
 
+import networkx as nx
 import torch
 import torch.nn.functional as F
 import wandb
@@ -14,7 +15,7 @@ from functorch import vmap
 from torch.distributions import Categorical
 from torch_geometric.data import Data
 from torch_geometric.nn import dense_diff_pool, DenseGCNConv
-from torch_geometric.utils import add_remaining_self_loops, to_dense_batch, k_hop_subgraph
+from torch_geometric.utils import add_remaining_self_loops, to_dense_batch, k_hop_subgraph, to_networkx
 from torch_scatter import scatter
 
 import clustering_wrappers
@@ -26,6 +27,7 @@ from custom_logger import log
 from data_generation import deserializer
 from graphutils import adj_to_edge_index
 from poolblocks.custom_asap import ASAPooling
+import networkx.algorithms.isomorphism as iso
 
 from typing import TYPE_CHECKING
 
@@ -93,6 +95,7 @@ class PoolBlock(torch.nn.Module, abc.ABC):
     def output_dim(self):
         return self.embedding_sizes[-1]
 
+
 class DenseNoPoolBlock(PoolBlock):
     """
     Dense layers without pooling
@@ -111,6 +114,7 @@ class DenseNoPoolBlock(PoolBlock):
             for conv in self.embedding_convs:
                 x = self.activation_function(conv(x, adj, mask))
         return x, adj, None, None, 0, None, x, mask
+
 
 class DiffPoolBlock(PoolBlock):
     def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
@@ -705,6 +709,7 @@ class MonteCarloBlock(PoolBlock):
         TEMPERATURE = 0.1  # softmax temperature that makes clearer which node is assigned to which cluster
         node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "border_color", "label", "activations"])
         edge_table = wandb.Table(["graph", "pool_step", "source", "target"])
+        concept_purity_table = wandb.Table(["pool_step", "concept", "top-graph", "occurrences"])
         device = custom_logger.device
         with torch.no_grad():
             data = data.clone().detach().to(device)
@@ -718,27 +723,44 @@ class MonteCarloBlock(PoolBlock):
                                 if not isinstance(model.graph_network.pool_blocks[i], DenseNoPoolBlock)]
             centroids = [torch.eye(data.x.shape[-1], device=custom_logger.device)] + \
                         [pb.cluster_alg.centroids.detach() if hasattr(pb, "cluster_alg") else None for pb in model.graph_network.pool_blocks]
-
-            ############################## Print Probability Distributions #########
+            # for each pool block [num_nodes_in_total, num_centroids] with the distance of each node embedding (after GNN) to each centroid
+            centroid_distances = [torch.cdist(pool_activations[pool_step + 1][masks[pool_step]], centroids[pool_step + 1])
+                         for pool_step in range(len(pool_assignments))]
+            # for each pool block [num_nodes_in_total] with the concept that is assigned to each input node to the pool block
+            initial_concepts = [torch.argmin(torch.cdist(input_embeddings[pool_step][masks[pool_step]], centroids[pool_step]), dim=-1)
+                                for pool_step in range(len(pool_assignments))]
+            ############################## Log distance to centroid distribution #########
             for pool_step in range(len(pool_assignments)):
                 pool_block = model.graph_network.pool_blocks[pool_step]
                 temperature = getattr(pool_block, "soft_sampling", 0)
+                # TODO at least for the paper I should reconsider doing this over the whole dataset instead of just one batch
+                sorted_distances, _ = torch.sort(centroid_distances[pool_step], dim=-1)
+                stds, means = torch.std_mean(sorted_distances, dim=0)
+                medians, _ = torch.median(sorted_distances, dim=0)
+                mins, _ = torch.min(sorted_distances, dim=0)
+                maxs, _ = torch.max(sorted_distances, dim=0)
+                dist_table = wandb.Table(["sortindex", "mean", "std", "median", "min", "max"])
+                for i in range(stds.shape[0]):
+                    dist_table.add_data(i, means[i].item(), stds[i].item(), medians[i].item(), mins[i].item(),
+                                        maxs[i].item())
+                log({"centroid_distances": dist_table}, step=epoch)
+
+                ############################## Print Probability Distributions #########
                 if temperature != 0:
-                    distances = torch.cdist(pool_activations[pool_step + 1][masks[pool_step]],
-                                            centroids[pool_step + 1])
-                    max_probs, arg_max = torch.max(torch.nn.functional.softmin(distances / temperature, dim=-1), dim=-1)
+                    # Note: the hard_assignments here are just a sanity check and should always agree. They can be
+                    # removed for efficiency
                     hard_assignments = pool_block.cluster_alg.predict(pool_activations[pool_step + 1][masks[pool_step]])
+                    max_probs, arg_max = torch.max(torch.nn.functional.softmin(centroid_distances[pool_step] / temperature, dim=-1), dim=-1)
                     print(f"\nProbability of most likely concept in pooling step {pool_step}: "
                           f"{100 * torch.mean(max_probs):.2f}%+-{100*torch.std(max_probs):.2f} with "
                           f"{100 * torch.sum(hard_assignments == arg_max) / arg_max.shape[0]:.2f}% of the soft maxima "
                           f"agreeing with the hard assignment")
 
-            ############################## Log Graphs ##############################
-            for graph_i in range(num_graphs_to_log):
-                for pool_step, assignment in enumerate(pool_assignments):
+                ############################## Log Graphs ##############################
+                for graph_i in range(num_graphs_to_log):
                     # Calculate concept assignment colors
                     # [num_nodes] (with batch dimension and masked nodes removed)
-                    assignment = assignment[graph_i][masks[pool_step][graph_i]].detach().cpu()
+                    assignment = pool_assignments[pool_step][graph_i][masks[pool_step][graph_i]].detach().cpu()
                     self._ensure_min_colors(torch.max(assignment) + 1, "clusters")
                     # [num_nodes, 3] (intermediate dimensions: num_nodes x num_clusters x 3)
                     concept_colors = self.cluster_colors[assignment, :]
@@ -764,21 +786,24 @@ class MonteCarloBlock(PoolBlock):
                                                          masks[pool_step][graph_i:graph_i+1])
                     for i in range(edge_index.shape[1]):
                         edge_table.add_data(graph_i, pool_step, edge_index[0, i].item(), edge_index[1, i].item())
-            log(dict(
-                # graphs_table=graphs_table
-                node_table=node_table,
-                edge_table=edge_table
-            ), step=epoch)
 
-            ############################## Log Concept Examples ##############################
-            SAMPLES_PER_CONCEPT = 3
-            # This is not ideal as we only sample concepts from the same (first) batch. But we could increase it's size
-
-            for concept in torch.unique(assignment).tolist():
-                node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "border_color", "label",
-                                          "activations"])
-                edge_table = wandb.Table(["graph", "pool_step", "source", "target"])
-                for pool_step, assignment in enumerate(pool_assignments):
+                assignment = pool_assignments[pool_step]
+                ############################## Log Concept Examples ##############################
+                # TODO instead of random, plot the most frequent graphs of concept
+                SAMPLES_PER_CONCEPT = 3
+                # This is not ideal as we only sample concepts from the same (first) batch. But we could increase it's size
+                concept_node_tables = {}
+                concept_edge_tables = {}
+                # [batch_size, max_num_nodes] True iff. the connected component of a node has already been explored
+                checked_mask = torch.zeros(*masks[pool_step].shape, dtype=torch.bool)
+                for concept in torch.unique(assignment).tolist():
+                    ####################### Log Example Concept Graphs #######################
+                    concept_node_table = concept_node_tables.get(concept,
+                                                                 wandb.Table(["graph", "pool_step", "node_index", "r",
+                                                                              "g", "b", "border_color", "label",
+                                                                              "activations"]))
+                    concept_edge_table = concept_edge_tables.get(concept,
+                                                                 wandb.Table(["graph", "pool_step", "source", "target"]))
                     samples_seen = 0
                     # [num_nodes_with_concept_total, 2] with all pairs of (batch_index, node_index) of nodes that are
                     # not masked and are classified to a certain example
@@ -805,17 +830,70 @@ class MonteCarloBlock(PoolBlock):
                         feature_colors = torch.round(feature_colors).to(int)
 
                         for i in range(subset.shape[0]):
-                            node_table.add_data(samples_seen, pool_step, i, feature_colors[i, 0].item(),
-                                                feature_colors[i, 1].item(), feature_colors[i, 2].item(),
-                                                "#F00" if subset[i] == node.item() else "#FFF",
-                                                "Distances: " + ", ".join([f"{m.item():.2f}" for m in distances[i, :].cpu()]), "")
+                            concept_node_table.add_data(samples_seen, pool_step, i, feature_colors[i, 0].item(),
+                                                        feature_colors[i, 1].item(), feature_colors[i, 2].item(),
+                                                        "#F00" if subset[i] == node.item() else "#FFF",
+                                                        "Distances: " + ", ".join([f"{m.item():.2f}" for m in distances[i, :].cpu()]), "")
                         for i in range(edge_index.shape[1]):
-                            edge_table.add_data(samples_seen, pool_step, edge_index[0, i].item(), edge_index[1, i].item())
+                            concept_edge_table.add_data(samples_seen, pool_step, edge_index[0, i].item(),
+                                                        edge_index[1, i].item())
                         samples_seen += 1
-                log({
-                    f"concept_node_table_{concept}": node_table,
-                    f"concept_edge_table_{concept}": edge_table
-                }, step=epoch)
+                    #
+                    # ################################ Log Concept Purtiy ################################
+                    # TODO this should ideally be somewhere where I pass over the whole graph
+                    # to reduce the number of isomorphism tests, we first build up a WL hash table. The entry at each
+                    # key contains a list of tuples of networkx graphs and the number of isomorphic graphs
+                    buckets = {}
+                    for sample, node in example_nodes:
+                        if checked_mask[sample, node]:
+                            continue
+                        edge_index_prev, _, _ = adj_to_edge_index(adjs[pool_step][sample])
+                        edge_index_prev = edge_index_prev[:, assignment[sample, edge_index_prev[0, :]] == assignment[
+                            sample, edge_index_prev[1, :]]]
+                        nodes_in_cur_graph = torch.sum(masks[pool_step][sample]).item()
+                        subset, edge_index, mapping, _ = k_hop_subgraph(node.item(), nodes_in_cur_graph,
+                                                                        edge_index_prev,
+                                                                        relabel_nodes=True,
+                                                                        num_nodes=nodes_in_cur_graph)
+                        checked_mask[sample, mapping] = True
+
+                        G = to_networkx(Data(concept=initial_concepts[pool_step], edge_index=edge_index,
+                                             num_nodes=nodes_in_cur_graph), to_undirected=not self.directed_graphs,
+                                        node_attrs=["concept"])
+                        key = nx.algorithms.graph_hashing.weisfeiler_lehman_graph_hash(G)
+
+                        if key in buckets:
+                            for other_graph, occurrences in buckets[key].items():
+                                # iso.generic_node_match("concept", None, list_close)
+                                if nx.is_isomorphic(other_graph, G, node_match=iso.categorical_node_match("concept",
+                                                                                                          None)):
+                                    buckets[key][other_graph] = occurrences + 1
+                                    break
+                            else:
+                                buckets[key][G] = 1
+                        else:
+                            buckets[key] = {G: 1}
+
+                    occurrences = []
+                    for bucket in buckets.values():
+                        occurrences += bucket.values()
+                    for top_k, occ in enumerate(reversed(sorted(occurrences))):
+                        concept_purity_table.add_data(pool_step, concept, top_k, occ)
+
+
+        log({f"concept_purity_table": concept_purity_table}, step=epoch)
+
+        for concept in concept_node_tables.keys():
+            log({
+                f"concept_node_table_{concept}": concept_node_tables[concept],
+                f"concept_edge_table_{concept}": concept_edge_tables[concept]
+            }, step=epoch)
+        log(dict(
+            # graphs_table=graphs_table
+            node_table=node_table,
+            edge_table=edge_table
+        ), step=epoch)
+
 
     def end_epoch(self):
         if not self.global_clusters:
