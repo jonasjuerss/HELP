@@ -707,8 +707,11 @@ class MonteCarloBlock(PoolBlock):
         # if using only a single example, some concepts might not be present but we still enforce the same number of
         # clusters
         TEMPERATURE = 0.1  # softmax temperature that makes clearer which node is assigned to which cluster
+        SAMPLES_PER_CONCEPT = 3
         node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "border_color", "label", "activations"])
         edge_table = wandb.Table(["graph", "pool_step", "source", "target"])
+        concept_node_tables = {}
+        concept_edge_tables = {}
         concept_purity_table = wandb.Table(["pool_step", "concept", "top-graph", "occurrences"])
         device = custom_logger.device
         with torch.no_grad():
@@ -725,12 +728,21 @@ class MonteCarloBlock(PoolBlock):
                         [pb.cluster_alg.centroids.detach() if hasattr(pb, "cluster_alg") else None for pb in model.graph_network.pool_blocks]
             # for each pool block [num_nodes_in_total, num_centroids] with the distance of each node embedding (after GNN) to each centroid
             centroid_distances = [torch.cdist(pool_activations[pool_step + 1][masks[pool_step]], centroids[pool_step + 1])
-                         for pool_step in range(len(pool_assignments))]
+                                  for pool_step in range(len(pool_assignments))]
             # for each pool block [num_nodes_in_total] with the concept that is assigned to each input node to the pool block
             initial_concepts = [torch.argmin(torch.cdist(input_embeddings[pool_step][masks[pool_step]], centroids[pool_step]), dim=-1)
                                 for pool_step in range(len(pool_assignments))]
+
             ############################## Log distance to centroid distribution #########
             for pool_step in range(len(pool_assignments)):
+                # [batch_size, max_num_nodes] with values in [-1, num_nodes_total] mapping each valid node index to its
+                # overall index and all others to -1
+                dense_to_sparse_maps = torch.full(masks[pool_step].shape, -1, dtype=torch.long,
+                                                  device=custom_logger.device)
+                dense_to_sparse_maps[masks[pool_step]] = torch.arange(dense_to_sparse_maps[masks[pool_step]].shape[0],
+                                                                      device=custom_logger.device)
+
+
                 pool_block = model.graph_network.pool_blocks[pool_step]
                 temperature = getattr(pool_block, "soft_sampling", 0)
                 # TODO at least for the paper I should reconsider doing this over the whole dataset instead of just one batch
@@ -788,58 +800,24 @@ class MonteCarloBlock(PoolBlock):
                         edge_table.add_data(graph_i, pool_step, edge_index[0, i].item(), edge_index[1, i].item())
 
                 assignment = pool_assignments[pool_step]
-                ############################## Log Concept Examples ##############################
-                # TODO instead of random, plot the most frequent graphs of concept
-                SAMPLES_PER_CONCEPT = 3
+
+
                 # This is not ideal as we only sample concepts from the same (first) batch. But we could increase it's size
-                concept_node_tables = {}
-                concept_edge_tables = {}
                 # [batch_size, max_num_nodes] True iff. the connected component of a node has already been explored
                 checked_mask = torch.zeros(*masks[pool_step].shape, dtype=torch.bool)
                 for concept in torch.unique(assignment).tolist():
                     ####################### Log Example Concept Graphs #######################
-                    concept_node_table = concept_node_tables.get(concept,
-                                                                 wandb.Table(["graph", "pool_step", "node_index", "r",
-                                                                              "g", "b", "border_color", "label",
-                                                                              "activations"]))
-                    concept_edge_table = concept_edge_tables.get(concept,
-                                                                 wandb.Table(["graph", "pool_step", "source", "target"]))
-                    samples_seen = 0
+                    if concept not in concept_node_tables:
+                        concept_node_tables[concept] = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b",
+                                                                    "border_color", "label", "activations"])
+                        concept_edge_tables[concept] = wandb.Table(["graph", "pool_step", "source", "target"])
+                    concept_node_table, concept_edge_table = concept_node_tables[concept], concept_edge_tables[concept]
+
                     # [num_nodes_with_concept_total, 2] with all pairs of (batch_index, node_index) of nodes that are
                     # not masked and are classified to a certain example
                     example_nodes = (torch.logical_and(masks[pool_step], assignment == concept)).nonzero()
-                    for sample, node in example_nodes[torch.randperm(example_nodes.shape[0]), :]:
-                        if samples_seen >= SAMPLES_PER_CONCEPT:
-                            break
-                        edge_index_prev, _, _ = adj_to_edge_index(adjs[pool_step][sample])
-                        edge_index_prev = edge_index_prev[:, assignment[sample, edge_index_prev[0, :]] == assignment[sample, edge_index_prev[1, :]]]
-                        nodes_in_cur_graph = torch.sum(masks[pool_step][sample]).item()
-                        subset, edge_index, _, _ = k_hop_subgraph(node.item(), nodes_in_cur_graph,
-                                                                  edge_index_prev,
-                                                                  relabel_nodes=True,
-                                                                  num_nodes=nodes_in_cur_graph)
 
-                        # [num_nodes_in_neighbourhood, num_concepts] where (i, j) gives difference between node i and concept j
-                        distances = torch.cdist(input_embeddings[pool_step][sample, masks[pool_step][sample]][subset],
-                                                centroids[pool_step])
-                        if distances.shape[1] > self.cluster_colors.shape[0]:
-                            raise ValueError(f"Cannot visualize {distances.shape[1]} using "
-                                             f"{self.cluster_colors.shape[0]} colors!")
-                        feature_colors = torch.sum(torch.nn.functional.softmin(distances / TEMPERATURE, dim=1)[:, :, None].cpu() *
-                                                   self.cluster_colors[None, :distances.shape[1], :], dim=1)
-                        feature_colors = torch.round(feature_colors).to(int)
-
-                        for i in range(subset.shape[0]):
-                            concept_node_table.add_data(samples_seen, pool_step, i, feature_colors[i, 0].item(),
-                                                        feature_colors[i, 1].item(), feature_colors[i, 2].item(),
-                                                        "#F00" if subset[i] == node.item() else "#FFF",
-                                                        "Distances: " + ", ".join([f"{m.item():.2f}" for m in distances[i, :].cpu()]), "")
-                        for i in range(edge_index.shape[1]):
-                            concept_edge_table.add_data(samples_seen, pool_step, edge_index[0, i].item(),
-                                                        edge_index[1, i].item())
-                        samples_seen += 1
-                    #
-                    # ################################ Log Concept Purtiy ################################
+                    # ################################ Log Concept Purity and Top Subgraphs ################################
                     # TODO this should ideally be somewhere where I pass over the whole graph
                     # to reduce the number of isomorphism tests, we first build up a WL hash table. The entry at each
                     # key contains a list of tuples of networkx graphs and the number of isomorphic graphs
@@ -857,8 +835,9 @@ class MonteCarloBlock(PoolBlock):
                                                                         num_nodes=nodes_in_cur_graph)
                         checked_mask[sample, mapping] = True
 
-                        G = to_networkx(Data(concept=initial_concepts[pool_step], edge_index=edge_index,
-                                             num_nodes=nodes_in_cur_graph), to_undirected=not self.directed_graphs,
+                        G = to_networkx(Data(concept=initial_concepts[pool_step][dense_to_sparse_maps[sample, subset]],
+                                             edge_index=edge_index, num_nodes=subset.shape[0]),
+                                        to_undirected=not self.directed_graphs,
                                         node_attrs=["concept"])
                         key = nx.algorithms.graph_hashing.weisfeiler_lehman_graph_hash(G)
 
@@ -876,10 +855,26 @@ class MonteCarloBlock(PoolBlock):
 
                     occurrences = []
                     for bucket in buckets.values():
-                        occurrences += bucket.values()
-                    for top_k, occ in enumerate(reversed(sorted(occurrences))):
-                        concept_purity_table.add_data(pool_step, concept, top_k, occ)
+                        occurrences += bucket.items()
 
+                    samples_seen = 0
+                    for top_k, (subgraph, occ) in enumerate(sorted(occurrences, key=lambda k: k[1], reverse=True)):
+                        concept_purity_table.add_data(pool_step, concept, top_k, occ)
+                        if samples_seen < SAMPLES_PER_CONCEPT:
+                            ################## Log Top Subgraphs in Concept #################
+                            for i, node_concept in nx.get_node_attributes(subgraph, "concept").items():
+                                self._ensure_min_colors(node_concept, "clusters")
+                                concept_node_table.add_data(samples_seen, pool_step, i, self.cluster_colors[node_concept][0],
+                                                            self.cluster_colors[node_concept][1],
+                                                            self.cluster_colors[node_concept][2],
+                                                            "#FFF", # as all nodes are mapped to the same concept, it doesn't matter which one was selected"#F00" if subset[i] == node.item() else "#FFF",
+                                                            # This gives insights how likely it would be that the node would have been mapped to another centroid
+                                                            # BUT would require either storing the "subset" mapping or the lables directly in the graph. Do if necessary.
+                                                            "", # "Distances: " + ", ".join([f"{m.item():.2f}" for m in centroid_distances[pool_step][i, :].cpu()]),
+                                                            "")
+                            for (from_node, to_node) in subgraph.edges:
+                                concept_edge_table.add_data(samples_seen, pool_step, from_node, to_node)
+                            samples_seen += 1
 
         log({f"concept_purity_table": concept_purity_table}, step=epoch)
 
@@ -893,7 +888,6 @@ class MonteCarloBlock(PoolBlock):
             node_table=node_table,
             edge_table=edge_table
         ), step=epoch)
-
 
     def end_epoch(self):
         if not self.global_clusters:

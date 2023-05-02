@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import time
 import traceback
 import typing
 import warnings
@@ -328,10 +329,11 @@ def main(args, **kwargs):
         val_acc = train_test_epoch(False, model, optimizer, val_loader, epoch,
                                    args.pooling_loss_weight, args.dense_data, args.probability_weights, 1,
                                    "val")
-        print("Finished train/test")
         try:
             if epoch % args.graph_log_freq == 0:
+                start_time = time.time()
                 model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, args.graphs_to_log, epoch)
+                print(f"Analysis took {time.time()-start_time:.2f} seconds!")
             for i, block in enumerate(model.graph_network.pool_blocks):
                 block.log_data(epoch, i)
 
