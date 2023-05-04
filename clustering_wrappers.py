@@ -107,14 +107,13 @@ class MeanShiftWrapper(ClusterAlgWrapper):
         self.range = range
         self._centroids = None
 
-
     def fit(self, X: torch.Tensor) -> None:
         centroids = X
         mask_prev = None
         mask = None
         while mask_prev is None or not torch.equal(mask, mask_prev):
             mask_prev = mask
-            # [num_centroids, num_points] boolean mask of  points in the area
+            # [num_centroids_new, num_centroids] boolean mask of  points in the area
             mask = torch.unique(torch.cdist(centroids, centroids) < self.range, dim=0)
             # from here on we, basically calculate mask @ centroids / sum(mask, dim=1) in a sparse/more efficient way
             # [num_points_in_mask, 2] indices of the points
@@ -132,8 +131,114 @@ class MeanShiftWrapper(ClusterAlgWrapper):
     def centroids(self) -> torch.Tensor:
         return self._centroids
 
+class SequentialKMeansMeanShiftWrapper(torch.nn.Module, ClusterAlgWrapper):
+    """
+    Idea: Inspired by https://qr.ae/pypKoP and the linked paper. Maintain overestimated number of sketches and counts
+    for each of them. Update according to (https://stackoverflow.com/a/3706827) and then also calculate the actually
+    used clusters from those high-level ones. Could either use my distance-metric based one again, or do whatever they
+    do in the paper (might be smarter)
+
+    For the clustering of sketches I could also use mean-shift
+
+    Note that I'm not exactly using the same mechanism for sequential stuff sa I update with the whole batch for
+    computational efficiency
+
+    We eliminate outliers / artifact from previous batches by eliminating all meanshift clusters under some threshold
+    --------------
+    Old Idea: Maintain centroids and counts. On each batch, update closed centroid if under some relative threshold,
+    otherwise create a new cluster
+    Some limited inspiration drawn from:
+    """
+
+    def __init__(self, num_sketches: int, mean_shift_range: float, min_samples_per_sketch: float,
+                 cluster_decay_factor: float = 1):
+        super().__init__()
+        self.num_sketches = num_sketches
+        self.decay_factor = cluster_decay_factor
+        self.min_samples_per_sketch = min_samples_per_sketch
+        self.mean_shift_range = mean_shift_range
+        self.sketches = None
+        self._centroids = None
+        self.counts = None
+
+    def dense_mean_shift(self, X: torch.Tensor) -> torch.Tensor:
+        """
+        Note that here the number of points will be relatively small (< 100) so converting to sparse might induce a
+        bigger overhead than just using the dense implementation
+        """
+        centroids = X
+        mask_prev = None
+        mask = None
+        while mask_prev is None or not torch.equal(mask, mask_prev):
+            mask_prev = mask
+            # [num_centroids_new, num_centroids] boolean mask of  points in the area
+            mask = torch.unique(torch.cdist(centroids, centroids) < self.mean_shift_range, dim=0)
+            centroids = (mask.float() @ centroids) / torch.sum(mask, dim=1, keepdim=True)
+        return centroids
+
+    def fit(self, X: torch.Tensor):
+        X = X.detach()
+        if self.sketches is None:
+            kmeans = KMeans(n_clusters=self.num_sketches)
+            closest = kmeans.fit_predict(X)
+            self.sketches = kmeans.centroids
+            self.counts = torch.bincount(closest).float()
+        else:
+            # [num_points, num_sketches]
+            closest = torch.argmin(torch.cdist(X, self.sketches), dim=1)
+            # [num_sketches]
+            new_counts = torch.bincount(closest, minlength=self.num_sketches)
+            self.counts *= self.decay_factor
+            # TODO here I'm potentially adding a large (sum of all points in sketch so far) to a small (sum of all close
+            #  points in this batch) number which might yield numerical instability. Hopefully, this shouldn't be too
+            #  much of a problem because of the decay.
+            update_mask = new_counts > 0
+            self.sketches[update_mask] = scatter(X, closest, dim=0, reduce="sum", dim_size=self.num_sketches)[update_mask] +\
+                                         self.counts[update_mask, None] * self.sketches[[update_mask]]
+            self.sketches[update_mask] /= (new_counts[update_mask] + self.counts[update_mask])[:, None]
+            self.counts += new_counts
+        self._centroids = self.dense_mean_shift(self.sketches[self.counts >
+                                                              self.min_samples_per_sketch * torch.sum(self.counts), :])
+        # closest = self.kmeans.fit_predict(X)
+        # # [num_concepts] with the number of points mapped to each cluster (>=1)
+        # counts = torch.bincount(closest)
+        # if self._centroids is None:
+        #     all_centroids = self.kmeans.centroids
+        #     self.counts = counts
+        # else:
+        #     # [num_clusters_current + num_clusters, embedding_dim]
+        #     all_centroids = torch.cat((self._centroids, self.kmeans.centroids), dim=0)
+        #     # [num_clusters_current + num_clusters]
+        #     self.counts = torch.cat((self.counts, counts), dim=0)
+        #
+        # # [num_clusters + num_clusters_current, num_clusters + num_clusters_current]
+        # centroid_dists = torch.cdist(all_centroids, all_centroids)
+        # merge_mask = centroid_dists < self.threshold * torch.max(centroid_dists)
+        # assignments = graphutils.dense_components(merge_mask[None, :, :],
+        #                                           torch.ones(merge_mask.shape[0], dtype=torch.bool,
+        #                                                      device=X.device)[None, :],
+        #                                           is_directed=False).squeeze(0) - 1
+        # closest = assignments[closest]
+        # self.centroids = scatter(X, closest, dim=-2, reduce="mean")
+        #
+        # # of course this is a bit shady. Clusters under the threshold might be merged in kmeans, moving the overall
+        # #  centroid too far away to later merge with current. So maybe I should just do KMeans without threshold and always apply it laters/ here
+        # # [num_clusters_batch]
+        # min_dist, nearest_cluster = torch.min(distances, dim=1)
+
+    def fit_copy(self, X: torch.Tensor) -> ClusterAlgWrapper:
+        raise NotImplementedError()
+
+    @property
+    def centroids(self) -> torch.Tensor:
+        return self._centroids
+
 
 class LearnableCentroidsWrapper(torch.nn.Module, ClusterAlgWrapper):
+    """
+    Currently unusable as no gradients are backpropagated to the centroids. Couldn't work brcause of the detach()es
+    before clustering anyway?
+    """
 
     def __init__(self, num_concepts: int, cluster_threshold: float, centroids_init_std: Optional[float] = None,
                  centroids_init_range: Optional[float] = None):

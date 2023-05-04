@@ -893,7 +893,7 @@ class MonteCarloBlock(PoolBlock):
         if not self.global_clusters:
             return
         self.use_global_clusters = True
-        self.cluster_alg.fit(self.seen_embeddings)
+        self.cluster_alg.fit(self.seen_embeddings.detach())
         self.seen_embeddings = torch.empty((0, self.num_output_features), device=custom_logger.device)
 
     @PoolBlock.output_dim.getter

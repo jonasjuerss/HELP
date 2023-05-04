@@ -179,7 +179,7 @@ class KMeans:
         device = X.device.type
         start_time = time()
         if centroids is None:
-            self.centroids = X[np.random.choice(batch_size, size=[self.n_clusters], replace=False)]
+            self.centroids = X[np.random.choice(batch_size, size=[self.n_clusters], replace=False)].detach()
         else:
             self.centroids = centroids
         num_points_in_clusters = torch.ones(self.n_clusters, device=device, dtype=X.dtype)
