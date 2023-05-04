@@ -205,7 +205,7 @@ class KMeans:
                     c_grad[c_grad != c_grad] = 0  # remove NaNs
                 else:
                     expanded_closest = closest[None].expand(len(matched_clusters), -1)
-                    mask = (expanded_closest == matched_clusters[:, None]).to(X.dtype)
+                   # mask = (expanded_closest == matched_clusters[:, None]).to(X.dtype)
 
             error = (c_grad - self.centroids).pow(2).sum()
             if self.minibatch is not None:

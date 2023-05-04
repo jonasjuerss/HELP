@@ -1,10 +1,12 @@
 from dataclasses import dataclass
-from typing import Optional, Type
+from functools import partial
+from typing import Optional, Type, List
 
 import matplotlib
 import networkx as nx
 import numpy as np
 import torch_geometric
+from functorch import vmap
 from matplotlib import pylab, pyplot as plt
 import torch
 from sklearn.base import BaseEstimator
@@ -17,6 +19,7 @@ from torch_scatter import scatter
 from sklearn.tree import DecisionTreeClassifier
 
 from clustering_wrappers import ClusterAlgWrapper
+from custom_net import InferenceInfo
 from data_generation.custom_dataset import HierarchicalMotifGraphTemplate
 from data_generation.dataset_wrappers import CustomDatasetWrapper
 from train import main
@@ -27,10 +30,12 @@ import custom_logger
 class Analyzer():
     def __init__(self, wandb_id: str, resume_last: bool, train_loader: DataLoader = None, test_loader: DataLoader = None):
         _train_loader, _val_loader, _test_loader = self.load_model(wandb_id, resume_last)
-        self.train_data, self.train_out, self.train_concepts, self.train_info, self.train_y_pred =\
+        self.train_data, self.train_out, self.train_concepts, train_info, self.train_y_pred =\
             self.load_whole_dataset(_train_loader if train_loader is None else train_loader)
-        self.test_data, self.test_out, self.test_concepts, self.test_info, self.test_y_pred = \
+        self.test_data, self.test_out, self.test_concepts, test_info, self.test_y_pred = \
             self.load_whole_dataset(_test_loader if test_loader is None else test_loader)
+        self.train_info: InferenceInfo = train_info
+        self.test_info: InferenceInfo = test_info
 
         #self.colors = np.array([matplotlib.colors.rgb2hex(c) for c in pylab.get_cmap("tab20").colors])
         self.input_dim : int = self.model.graph_network.pool_blocks[0].input_dim
@@ -57,7 +62,8 @@ class Analyzer():
         print(f"Accuracy: {100 * torch.sum(y_pred == data.y.squeeze(-1)) / y_pred.shape[0]:.2f}%")
         return data, out, concepts, info, y_pred
 
-    def _decision_tree_acc(self, X_train: np.ndarray, Y_train: np.ndarray, X_test: Optional[np.ndarray] = None,
+    @staticmethod
+    def _decision_tree_acc(X_train: np.ndarray, Y_train: np.ndarray, X_test: Optional[np.ndarray] = None,
                            Y_test: Optional[np.ndarray] = None) -> float:
         """
 
@@ -67,18 +73,47 @@ class Analyzer():
         :param Y_test: [num_points] labels to measure accuracy (Y_train if not given)
         :return: accuracy of a decision tree fit to the given data
         """
-        tree = DecisionTreeClassifier
+        tree = DecisionTreeClassifier()
         tree.fit(X_train, Y_train)
         return tree.score(X_test if X_test is not None else X_train, Y_test if Y_test is not None else Y_train)
-    def calculate_concept_completeness(self) ->  float:
-        datset_instance = self.dataset_wrapper.get_dataset(self.config.dense_data, 0)
-        if isinstance(self.dataset_wrapper, CustomDatasetWrapper):
-            if isinstance(self.dataset_wrapper.sampler, HierarchicalMotifGraphTemplate):
-                raise NotImplementedError()
-            else:
-                raise NotImplementedError()
-        else:
-            raise NotImplementedError()
+
+    def calculate_concept_completeness(self, multiset: bool = True) -> List[float]:
+        """
+        Important: For the inputs, this assumes one-hot encoding
+        """
+        enumerate_feat = 2 ** torch.arange(self.train_data.x.shape[-1], device=self.train_data.x.device)[None, None, :]
+        all_train_assignments = [torch.sum(self.train_data.x.int() * enumerate_feat, dim=-1)] +\
+                                self.train_info.pooling_assignments
+        all_test_assignments = [torch.sum(self.test_data.x.int() * enumerate_feat, dim=-1)] +\
+                               self.test_info.pooling_assignments
+        result = []
+        for pool_step, (train_assignments, test_assignments) in enumerate(zip(all_train_assignments,
+                                                                              all_test_assignments)):
+            if train_assignments is None:
+                continue  # For non-MonteCarlo layers
+            num_concepts = max(torch.max(train_assignments), torch.max(test_assignments)) + 1
+            batched_bincount = vmap(partial(torch.bincount, minlength=num_concepts + 1))
+
+            # [batch_size, num_concepts] (note that assignments contains -1 for masked values)
+            multisets_train = batched_bincount(train_assignments + 1)[:, 1:]
+            multisets_test = batched_bincount(test_assignments + 1)[:, 1:]
+
+            if not multiset:
+                multisets_train = multisets_train.bool().int()
+                multisets_test = multisets_test.bool().int()
+
+            result.append(self._decision_tree_acc(multisets_train.cpu(), self.train_data.y.squeeze().cpu(),
+                                                  multisets_test.cpu(), self.test_data.y.squeeze().cpu()))
+        return result
+
+        # dataset_instance = self.dataset_wrapper.get_dataset(self.config.dense_data, 0)
+        # if isinstance(self.dataset_wrapper, CustomDatasetWrapper):
+        #     if isinstance(self.dataset_wrapper.sampler, HierarchicalMotifGraphTemplate):
+        #         raise NotImplementedError()
+        #     else:
+        #         raise NotImplementedError()
+        # else:
+        #     raise NotImplementedError()
 
     def plot_clusters(self, cluster_alg: Optional[Type[ClusterAlgWrapper]] = None, save_path: Optional[str] = None,
                       dim_reduc: Type[BaseEstimator] = TSNE, **cluster_alg_kwargs):

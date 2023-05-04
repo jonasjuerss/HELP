@@ -19,7 +19,8 @@ from poolblocks.poolblock import PoolBlock
 class InferenceInfo:
     pooling_assignments: List[torch.Tensor]
     """The assignments from nodes to clusters they were pooled to (takes different forms depending on the pooling 
-    method) """
+    method). For MonteCarlo: [batch_size, max_num_nodes] with integer values corresponding to the assigned cluster or
+    -1 for masked nodes."""
     pooling_activations: List[torch.Tensor]
     """The input embeddings to the pooling operation (after applying the GNN layers)"""
     adjs_or_edge_indices: List[torch.Tensor]

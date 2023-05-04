@@ -518,7 +518,7 @@ def _generate_assignments(x_mask, adj, mask, is_directed, batch_size, max_num_no
     # get different clusters).
     concept_assignments, mak_temp = to_dense_batch(concept_assignments, batch=batch,
                                                    batch_size=batch_size * num_mc_samples,
-                                                   max_num_nodes=max_num_nodes)
+                                                   max_num_nodes=max_num_nodes, fill_value=-1)
     # [batch_size * (num_mc_samples if soft_sampling else 1), max_num_nodes] assigns each node to a cluster. 0 for masked nodes
     assignments = _calculate_local_clusters_scipy(concept_assignments, adj, mask.repeat(num_mc_samples, 1), is_directed)
 

@@ -171,6 +171,7 @@ class BlackBoxSkipFun(torch.autograd.Function):
         grad_prod = grad_prod.reshape(ctx.saved_tensors[0].shape)
         return grad_prod, grad_out, *((None, ) * (7 + len(ctx.kwargs)))
 
+
 class BlackBoxModule(torch.nn.Module, abc.ABC):
 
     def __init__(self, num_samples: int, noise_distr: torch.distributions.Distribution, non_batch_dims: int,
