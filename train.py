@@ -330,14 +330,14 @@ def main(args, **kwargs):
                                    args.pooling_loss_weight, args.dense_data, args.probability_weights, 1,
                                    "val")
         try:
-            if epoch % args.graph_log_freq == 0:
+            if args.graph_log_freq >= 0 and epoch % args.graph_log_freq == 0:
                 start_time = time.time()
                 model.graph_network.pool_blocks[0].log_assignments(model, graphs_to_log, args.graphs_to_log, epoch)
                 print(f"Analysis took {time.time()-start_time:.2f} seconds!")
             for i, block in enumerate(model.graph_network.pool_blocks):
                 block.log_data(epoch, i)
 
-            if epoch % args.formula_log_freq == 0:
+            if args.formula_log_freq >= 0 and epoch % args.formula_log_freq == 0:
                 log_formulas(model, train_loader, test_loader, dataset_wrapper.class_names, epoch)
             if val_acc > max_val_acc or (
                     val_acc == max_val_acc and last_best_save + save_same_acc_cooldown <= epoch):
