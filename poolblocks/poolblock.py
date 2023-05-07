@@ -484,7 +484,7 @@ def _generate_assignments(x_mask, adj, mask, is_directed, batch_size, max_num_no
         if parallel:
             cluster_alg = cluster_alg.fit_copy(x_mask)
         else:
-            cluster_alg.fit(x_mask.detach())
+            cluster_alg.fit(x_mask.detach(), train=training)
 
     if (soft_sampling != 0 and training) or clustering_loss_weight != 0:
         # https://ai.stackexchange.com/questions/13776/how-is-reinforce-used-instead-of-backpropagation
@@ -572,6 +572,7 @@ class MonteCarloBlock(PoolBlock):
         self.perturbation = None if perturbation is None else\
             typing.cast(PerturbingDistribution, deserializer.from_dict(perturbation))
         self.transparency = transparency
+        self.last_num_clusters = None
 
         self.num_mc_samples = num_mc_samples
         if num_mc_samples > 1 and soft_sampling == 0 and perturbation is None:
@@ -755,7 +756,7 @@ class MonteCarloBlock(PoolBlock):
                 for i in range(stds.shape[0]):
                     dist_table.add_data(i, means[i].item(), stds[i].item(), medians[i].item(), mins[i].item(),
                                         maxs[i].item())
-                log({"centroid_distances": dist_table}, step=epoch)
+                log({f"centroid_distances_{pool_step}": dist_table}, step=epoch)
 
                 ############################## Print Probability Distributions #########
                 if temperature != 0:
@@ -893,7 +894,7 @@ class MonteCarloBlock(PoolBlock):
         if not self.global_clusters:
             return
         self.use_global_clusters = True
-        self.cluster_alg.fit(self.seen_embeddings.detach())
+        self.cluster_alg.fit(self.seen_embeddings.detach(), train=True)
         self.seen_embeddings = torch.empty((0, self.num_output_features), device=custom_logger.device)
 
     @PoolBlock.output_dim.getter

@@ -17,14 +17,14 @@ class ClusterAlgWrapper(abc.ABC):
     def __init__(self, **kwargs):
         self.kwargs = kwargs
 
-    def fit_predict(self, X: torch.Tensor) -> torch.Tensor:
+    def fit_predict(self, X: torch.Tensor, train: bool = False) -> torch.Tensor:
         """
 
         :param X: [num_points, feature_dim]
         :param centroids: [num_centroids, feature_dim]
         :return: [num_points] (integer/long tensor with values in {0, num_centroids - 1})
         """
-        self.fit(X)
+        self.fit(X, train=train)
         return self.predict(X)
 
     def predict(self, X: torch.Tensor) -> torch.Tensor:
@@ -33,13 +33,13 @@ class ClusterAlgWrapper(abc.ABC):
         return torch.argmin(torch.cdist(X, self.centroids), dim=-1)
 
     @abc.abstractmethod
-    def fit(self, X: torch.Tensor) -> None:
+    def fit(self, X: torch.Tensor, train: bool = False) -> None:
         """
         Fits to the given points and returns itself for convenience
         """
         pass
 
-    def fit_copy(self, X: torch.Tensor) -> ClusterAlgWrapper:
+    def fit_copy(self, X: torch.Tensor, train: bool = False) -> ClusterAlgWrapper:
         """
         Used to avoid problems when calling fit() in parallel.
         By default creates a copy using the kwargs given to the super constructor and fits it to the given points.
@@ -67,13 +67,13 @@ class KMeansWrapper(ClusterAlgWrapper):
                 del kwargs[k]
         self.kmeans = KMeans(**kwargs)
 
-    def fit(self, X: torch.Tensor) -> None:
+    def fit(self, X: torch.Tensor, train: bool = False) -> None:
         self.kmeans.fit(X)
 
     def predict(self, X: torch.Tensor) -> torch.Tensor:
         return self.kmeans.predict(X)
 
-    def fit_predict(self, X: torch.Tensor) -> torch.Tensor:
+    def fit_predict(self, X: torch.Tensor, train: bool = False) -> torch.Tensor:
         return self.kmeans.fit_predict(X)
 
     @property
@@ -107,7 +107,7 @@ class MeanShiftWrapper(ClusterAlgWrapper):
         self.range = range
         self._centroids = None
 
-    def fit(self, X: torch.Tensor) -> None:
+    def fit(self, X: torch.Tensor, train: bool = False) -> None:
         centroids = X
         mask_prev = None
         mask = None
@@ -151,7 +151,7 @@ class SequentialKMeansMeanShiftWrapper(torch.nn.Module, ClusterAlgWrapper):
     """
 
     def __init__(self, num_sketches: int, mean_shift_range: float, min_samples_per_sketch: float,
-                 cluster_decay_factor: float = 1):
+                 cluster_decay_factor: float = 1, rescale_clusters_decay: float = -1):
         super().__init__()
         self.num_sketches = num_sketches
         self.decay_factor = cluster_decay_factor
@@ -160,6 +160,8 @@ class SequentialKMeansMeanShiftWrapper(torch.nn.Module, ClusterAlgWrapper):
         self.sketches = None
         self._centroids = None
         self.counts = None
+        self.rescale_clusters_decay = rescale_clusters_decay
+        self.running_std = None
 
     def dense_mean_shift(self, X: torch.Tensor) -> torch.Tensor:
         """
@@ -176,8 +178,17 @@ class SequentialKMeansMeanShiftWrapper(torch.nn.Module, ClusterAlgWrapper):
             centroids = (mask.float() @ centroids) / torch.sum(mask, dim=1, keepdim=True)
         return centroids
 
-    def fit(self, X: torch.Tensor):
+    def fit(self, X: torch.Tensor, train: bool = False):
+        if not train:
+            return
         X = X.detach()
+        if self.rescale_clusters_decay != -1:
+            if self.running_std is None:
+                self.running_std = (1 - self.rescale_clusters_decay) * torch.std(X, dim=0, keepdim=True)
+            else:
+                self.running_std = self.rescale_clusters_decay * self.running_std +\
+                                   (1 - self.rescale_clusters_decay) * torch.std(X, dim=0, keepdim=True)
+            X = X / self.running_std
         if self.sketches is None:
             kmeans = KMeans(n_clusters=self.num_sketches)
             closest = kmeans.fit_predict(X)
@@ -226,12 +237,13 @@ class SequentialKMeansMeanShiftWrapper(torch.nn.Module, ClusterAlgWrapper):
         # # [num_clusters_batch]
         # min_dist, nearest_cluster = torch.min(distances, dim=1)
 
-    def fit_copy(self, X: torch.Tensor) -> ClusterAlgWrapper:
+    def fit_copy(self, X: torch.Tensor, train: bool = False) -> ClusterAlgWrapper:
         raise NotImplementedError()
 
     @property
-    def centroids(self) -> torch.Tensor:
-        return self._centroids
+    def centroids(self, train: bool = False) -> torch.Tensor:
+        # Note: in particular, the default predict() implementation will continue working because we scale here
+        return self._centroids if self.rescale_clusters_decay == -1 else self._centroids * self.running_std
 
 
 class LearnableCentroidsWrapper(torch.nn.Module, ClusterAlgWrapper):
@@ -252,7 +264,7 @@ class LearnableCentroidsWrapper(torch.nn.Module, ClusterAlgWrapper):
         self.centroids_dirty = True
         self._centroids = None
 
-    def fit(self, X: torch.Tensor) -> None:
+    def fit(self, X: torch.Tensor, train: bool = False) -> None:
         if self._centroids is None:
             if self.init_range is None:
                 init = self.init_std * torch.randn(self.num_centroids, X.shape[1], device=custom_logger.device)
@@ -270,7 +282,7 @@ class LearnableCentroidsWrapper(torch.nn.Module, ClusterAlgWrapper):
     def predict(self, X: torch.Tensor) -> torch.Tensor:
         return torch.argmin(torch.cdist(X, self.centroids), dim=-1)
 
-    def fit_copy(self, X: torch.Tensor) -> ClusterAlgWrapper:
+    def fit_copy(self, X: torch.Tensor, train: bool = False) -> ClusterAlgWrapper:
         raise NotImplementedError()
 
     @ClusterAlgWrapper.centroids.getter
