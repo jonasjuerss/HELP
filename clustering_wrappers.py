@@ -168,6 +168,8 @@ class SequentialKMeansMeanShiftWrapper(torch.nn.Module, ClusterAlgWrapper):
         Note that here the number of points will be relatively small (< 100) so converting to sparse might induce a
         bigger overhead than just using the dense implementation
         """
+        if self.mean_shift_range <= 0:
+            return X
         centroids = X
         mask_prev = None
         mask = None
@@ -208,6 +210,7 @@ class SequentialKMeansMeanShiftWrapper(torch.nn.Module, ClusterAlgWrapper):
                                          self.counts[update_mask, None] * self.sketches[[update_mask]]
             self.sketches[update_mask] /= (new_counts[update_mask] + self.counts[update_mask])[:, None]
             self.counts += new_counts
+
         self._centroids = self.dense_mean_shift(self.sketches[self.counts >
                                                               self.min_samples_per_sketch * torch.sum(self.counts), :])
         # closest = self.kmeans.fit_predict(X)
