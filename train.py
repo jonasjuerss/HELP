@@ -221,20 +221,16 @@ def main(args, **kwargs):
         if not args["use_wandb"] and args["save_wandb"]:
             print("Disabling saving to wandb as logging to wandb is also disabled.")
             args["save_wandb"] = False
-
-    save_path = args.save_path
     if isinstance(args, dict):
         args = SimpleNamespace(**args)
-
-    if "dummy" in save_path:
-        pass
-    else:
+    save_path = args.save_path
+    if "dummy" not in save_path:
         i = 1
         while os.path.exists(save_path):
             print(f"Checkpoint path already exists: {save_path}!")
             save_path = f"{args.save_path}-{i}"
             i += 1
-        os.makedirs(args.save_path)
+    os.makedirs(save_path)
 
     if args.probability_weights != "none" and any([block_args.get("soft_sampling", -1) == 0
                                                    for block_args in args.pool_block_args]):
