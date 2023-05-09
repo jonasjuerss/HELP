@@ -230,7 +230,7 @@ def main(args, **kwargs):
             print(f"Checkpoint path already exists: {save_path}!")
             save_path = f"{args.save_path}-{i}"
             i += 1
-    os.makedirs(save_path)
+        os.makedirs(save_path)
 
     if args.probability_weights != "none" and any([block_args.get("soft_sampling", -1) == 0
                                                    for block_args in args.pool_block_args]):
@@ -350,7 +350,7 @@ def main(args, **kwargs):
                 last_best_save = epoch
                 log({"best_val_acc": max_val_acc, "test_at_best_val_acc": test_acc}, step=epoch)
             if epoch % args.save_freq == 0:
-                torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict()}, model_save_path_best)
+                torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict()}, model_save_path_last)
                 if args.save_wandb:
                     wandb.save(model_save_path_last, policy="now")
         except Exception:
