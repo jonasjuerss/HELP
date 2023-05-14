@@ -212,4 +212,4 @@ class SparseGraphPoolingNetwork(GraphPoolingNetwork):
             if self.use_probability_weights and probs is not None:
                 probabilities = probs if probabilities is None else probabilities * probs
         return x, probabilities, pooling_loss, pooling_assignments, pooling_activations, batch, edge_indices, batches, \
-            input_embeddings
+            input_embeddings, None

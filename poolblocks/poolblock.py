@@ -54,6 +54,26 @@ class PoolBlock(torch.nn.Module, abc.ABC):
         self.activation_function = activation_function
         self.embedding_sizes = embedding_sizes
         self.directed_graphs = directed_graphs
+        self.cluster_colors = torch.tensor([
+            [244, 67, 54],
+            [156, 39, 176],
+            [63, 81, 181],
+            [3, 169, 244],
+            [0, 150, 136],
+            [139, 195, 74],
+            [255, 235, 59],
+            [255, 152, 0],
+            [121, 85, 72],
+            [96, 125, 139],
+            [233, 30, 99],
+            [103, 58, 183],
+            [33, 150, 243],
+            [0, 188, 212],
+            [76, 175, 80],
+            [205, 220, 57],
+            [255, 193, 7],
+            [255, 87, 34],
+            [158, 158, 158]], dtype=torch.float)
 
     @abc.abstractmethod
     def forward(self, x: torch.Tensor, adj_or_edge_index: torch.Tensor, mask_or_batch=None,
@@ -87,6 +107,15 @@ class PoolBlock(torch.nn.Module, abc.ABC):
     def end_epoch(self):
         pass
 
+    def _ensure_min_colors(self, required_colors: int | torch.Tensor, purpose: str):
+        if self.cluster_colors.shape[0] < required_colors:
+            warnings.warn(
+                f"Only {self.cluster_colors.shape[0]} colors given to distinguish {required_colors} "
+                f"{purpose}! Extending with black colors.")
+            self.cluster_colors = torch.cat((self.cluster_colors,
+                                             torch.zeros(required_colors - self.cluster_colors.shape[0], 3,
+                                                         device=self.cluster_colors.device)), dim=0)
+
     @property
     def input_dim(self):
         return self.embedding_sizes[0]
@@ -94,7 +123,6 @@ class PoolBlock(torch.nn.Module, abc.ABC):
     @property
     def output_dim(self):
         return self.embedding_sizes[-1]
-
 
 class DenseNoPoolBlock(PoolBlock):
     """
@@ -114,6 +142,26 @@ class DenseNoPoolBlock(PoolBlock):
             for conv in self.embedding_convs:
                 x = self.activation_function(conv(x, adj, mask))
         return x, adj, None, None, 0, None, x, mask
+
+
+class SparseNoPoolBlock(PoolBlock):
+    """
+    Dense layers without pooling
+    """
+
+    def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
+                 activation_function=F.relu, forced_embeddings=None, **kwargs):
+        super().__init__(embedding_sizes, conv_type, activation_function, forced_embeddings, **kwargs)
+        self.embedding_convs = torch.nn.ModuleList([conv_type(embedding_sizes[i], embedding_sizes[i + 1])
+                                                    for i in range(len(embedding_sizes) - 1)])
+
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, batch=None, edge_weights=None):
+        if self.forced_embeddings is not None:
+            x = torch.ones(x.shape[:-1] + (self.output_dim,), device=x.device) * self.forced_embeddings
+        else:
+            for conv in self.embedding_convs:
+                x = self.activation_function(conv(x, edge_index, edge_weights))
+        return x, edge_index, None, None, 0, None, x, batch
 
 
 class DiffPoolBlock(PoolBlock):
@@ -245,22 +293,12 @@ class ASAPBlock(PoolBlock):
         self.num_output_features = embedding_sizes[-1]
 
         self.asap = ASAPooling(self.num_output_features, k)
-        self.cluster_colors = torch.tensor([
-            [22, 160, 133],
-            [243, 156, 18],
-            [142, 68, 173],
-            [39, 174, 96],
-            [192, 57, 43],
-            [44, 62, 80],
-            [41, 128, 185],
-            [39, 174, 96],
-            [211, 84, 0],
-            [121, 85, 72]], dtype=torch.float)
 
-    def forward(self, x: torch.Tensor, edge_index: torch.Tenso, batch=None, edge_weights=None):
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, batch=None, edge_weights=None):
 
         if self.forced_embeddings is None:
             for conv in self.embedding_convs:
+                # print(x.shape, edge_index.shape)
                 x = self.activation_function(conv(x, edge_index, edge_weight=edge_weights))
         else:
             x = torch.ones(x.shape[:-1] + (self.num_output_features,), device=x.device) * self.forced_embeddings
@@ -269,19 +307,29 @@ class ASAPBlock(PoolBlock):
                                                                                     edge_weight=edge_weights)
         return new_x, edge_index, new_edge_weight, None, 0, (perm, fitness, score), x, batch
 
-    def log_assignments(self, model: CustomNet, graphs: typing.List[Data], epoch: int):
+    def log_assignments(self, model: CustomNet, all_data: Data, num_graphs_to_log: int, epoch: int):
         node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "border_strength", "border_color",
                                   "label", "activations"])
         edge_table = wandb.Table(["graph", "pool_step", "source", "target", "strength"])  # , "label", "strength"
         device = self.embedding_convs[0].bias.device
         with torch.no_grad():
-            for graph_i, data in enumerate(graphs):
+            for graph_i in range(num_graphs_to_log):
+                mask = all_data.batch == graph_i
+                start_index = torch.arange(mask.shape[0])[mask][0]
+                num_nodes = torch.sum(mask)
+                data = Data(x=all_data.x[start_index:start_index+num_nodes],
+                            edge_index=all_data.edge_index[:,
+                                       torch.logical_and(all_data.edge_index[0] >= start_index,
+                                                         all_data.edge_index[0] < start_index + num_nodes)] - start_index,
+                            num_nodes=num_nodes)
                 edge_index = data.edge_index.detach().clone()
                 edge_index, _ = add_remaining_self_loops(edge_index, fill_value=1., num_nodes=data.num_nodes)
 
                 data = data.clone().detach().to(device)
                 num_nodes = data.num_nodes  # note that this will be changed to tensor in model call
-                out, concepts, _, assigment_info, pool_activations = model(data)
+                out, _, concepts, _, info = model(data, collect_info=True)
+                assigment_info = info.pooling_assignments
+                pool_activations = info.pooling_activations
 
                 for pool_step, (perm, fitness, score) in enumerate(assigment_info[:1]):
                     # [num_nodes]
@@ -291,6 +339,7 @@ class ASAPBlock(PoolBlock):
 
                     # [num_nodes, 3] (intermediate dimensions: num_nodes x num_clusters x 3)
                     colors = torch.zeros((num_nodes, 3))
+                    self._ensure_min_colors(perm.shape[0], "clusters")
                     colors[perm, :] = self.cluster_colors[:perm.shape[0]]
 
                     # perform inverse thing from ASAP (color the nodes that effected the outcome)
@@ -413,64 +462,64 @@ def _perturbed_clustering(x: torch.Tensor, adj: torch.Tensor,
     return x_new, adj_new, mask_new, assignments
 
 
-class PerturbedBlock(PoolBlock):
-    """
-    TODO: Main takeaway: Gradient Estimation via Monte Carlo Sampling might be a good idea. Main challenge:
-        - Is there any way I can "merge" to a single gradient after a layer like they did?
-            - Otherwise, the number of examples would grow exponentially in the pooling layers
-            - But I think it could still be feasible for moderately sized graphs with 2 optimizations:
-                1. Only recompute clustering if the soft input concept assignment change the hard assignment of a node
-                    (makes larger numbers of samples feasible)
-                2. Maybe there is some way to average over output embeddings and only get one forward pass per different
-                    output graph structure. Kinda doubt it though as we can't jus average the inputs in DL to get average
-                    gradients
-
-
-
-    TODO If this works, it could be expanded with sth like stick-breaking VAE to support a variable number of clusters
-    """
-
-    def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
-                 activation_function=F.relu, forced_embeddings=None, num_concepts: int = None,
-                 **kwargs):
-        super().__init__(embedding_sizes, conv_type, activation_function, forced_embeddings, **kwargs)
-        self.embedding_convs = torch.nn.ModuleList([conv_type(embedding_sizes[i], embedding_sizes[i + 1])
-                                                    for i in range(len(embedding_sizes) - 1)])
-        self.num_output_features = embedding_sizes[-1]
-
-        self.concept_layer = torch.nn.Sequential(
-            torch.nn.Linear(embedding_sizes[-1], embedding_sizes[-1]),
-            torch.nn.ReLU(),
-            torch.nn.Linear(embedding_sizes[-1], num_concepts))
-
-    def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None, num_samples=100):
-        if self.forced_embeddings is not None:
-            x = torch.ones(x.shape[:-1] + (self.num_output_features,), device=x.device) * self.forced_embeddings
-        else:
-            for conv in self.embedding_convs:
-                x = self.activation_function(conv(x, adj, mask))
-        # TODO this is fine for the first layer as the input graph is fixed but does not allow us to back-propagate from
-        #  later layers to adjust the structure in previous ones. Maybe Gumbel softmax??
-        # TODO check that what they do actually resembles repeat_interleave not repeat. Otherwise, also change averaging
-        #  of output accordingly
-        adj_all = torch.repeat_interleave(adj, num_samples, dim=0)
-        mask_all = torch.repeat_interleave(mask, num_samples, dim=0)
-        cluster_fun = partial(_perturbed_clustering, adj=adj_all, cluster_membership_fun=self.concept_layer,
-                              mask=mask_all)
-        # TODO
-        # print("num_samples seems to increase the batch dimension of the input whereas none of the other stuff (adj, ...)"
-        #       "get broadcasted. Thought recalculating everything (clustering etc) would be deadly but just realized "
-        #       "there's no way around this as the whole differentiability relies on it.")
-        cluster_fun = perturbations.perturbed(cluster_fun, device=custom_logger.device, num_samples=num_samples)
-
-        # x_new: [batch_size, max_num_clusters, embedding_size]
-        # adj_new: [batch_size * num_samples, max_num_clusters, max_num_clusters]
-        # mask_new: [batch_size * num_samples, max_num_clusters]
-        x_new, adj_new, mask_new, assignments = cluster_fun(x)
-        # TODO those 2 choices can't really work, check code
-        adj_new = torch.mean(adj_new.reshape(num_samples, -1, adj_new.shape[-2], adj_new.shape[-1]), dim=0)
-        mask_new, _ = torch.max(mask_new.reshape(num_samples, -1, mask_new.shape[-1]), dim=0)
-        return x_new, adj_new, None, None, 0, assignments, x, mask_new
+# class PerturbedBlock(PoolBlock):
+#     """
+#     TODO: Main takeaway: Gradient Estimation via Monte Carlo Sampling might be a good idea. Main challenge:
+#         - Is there any way I can "merge" to a single gradient after a layer like they did?
+#             - Otherwise, the number of examples would grow exponentially in the pooling layers
+#             - But I think it could still be feasible for moderately sized graphs with 2 optimizations:
+#                 1. Only recompute clustering if the soft input concept assignment change the hard assignment of a node
+#                     (makes larger numbers of samples feasible)
+#                 2. Maybe there is some way to average over output embeddings and only get one forward pass per different
+#                     output graph structure. Kinda doubt it though as we can't jus average the inputs in DL to get average
+#                     gradients
+#
+#
+#
+#     TODO If this works, it could be expanded with sth like stick-breaking VAE to support a variable number of clusters
+#     """
+#
+#     def __init__(self, embedding_sizes: List[int], conv_type=DenseGCNConv,
+#                  activation_function=F.relu, forced_embeddings=None, num_concepts: int = None,
+#                  **kwargs):
+#         super().__init__(embedding_sizes, conv_type, activation_function, forced_embeddings, **kwargs)
+#         self.embedding_convs = torch.nn.ModuleList([conv_type(embedding_sizes[i], embedding_sizes[i + 1])
+#                                                     for i in range(len(embedding_sizes) - 1)])
+#         self.num_output_features = embedding_sizes[-1]
+#
+#         self.concept_layer = torch.nn.Sequential(
+#             torch.nn.Linear(embedding_sizes[-1], embedding_sizes[-1]),
+#             torch.nn.ReLU(),
+#             torch.nn.Linear(embedding_sizes[-1], num_concepts))
+#
+#     def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None, num_samples=100):
+#         if self.forced_embeddings is not None:
+#             x = torch.ones(x.shape[:-1] + (self.num_output_features,), device=x.device) * self.forced_embeddings
+#         else:
+#             for conv in self.embedding_convs:
+#                 x = self.activation_function(conv(x, adj, mask))
+#         # TODO this is fine for the first layer as the input graph is fixed but does not allow us to back-propagate from
+#         #  later layers to adjust the structure in previous ones. Maybe Gumbel softmax??
+#         # TODO check that what they do actually resembles repeat_interleave not repeat. Otherwise, also change averaging
+#         #  of output accordingly
+#         adj_all = torch.repeat_interleave(adj, num_samples, dim=0)
+#         mask_all = torch.repeat_interleave(mask, num_samples, dim=0)
+#         cluster_fun = partial(_perturbed_clustering, adj=adj_all, cluster_membership_fun=self.concept_layer,
+#                               mask=mask_all)
+#         # TODO
+#         # print("num_samples seems to increase the batch dimension of the input whereas none of the other stuff (adj, ...)"
+#         #       "get broadcasted. Thought recalculating everything (clustering etc) would be deadly but just realized "
+#         #       "there's no way around this as the whole differentiability relies on it.")
+#         cluster_fun = perturbations.perturbed(cluster_fun, device=custom_logger.device, num_samples=num_samples)
+#
+#         # x_new: [batch_size, max_num_clusters, embedding_size]
+#         # adj_new: [batch_size * num_samples, max_num_clusters, max_num_clusters]
+#         # mask_new: [batch_size * num_samples, max_num_clusters]
+#         x_new, adj_new, mask_new, assignments = cluster_fun(x)
+#         # TODO those 2 choices can't really work, check code
+#         adj_new = torch.mean(adj_new.reshape(num_samples, -1, adj_new.shape[-2], adj_new.shape[-1]), dim=0)
+#         mask_new, _ = torch.max(mask_new.reshape(num_samples, -1, mask_new.shape[-1]), dim=0)
+#         return x_new, adj_new, None, None, 0, assignments, x, mask_new
 
 def _generate_assignments(x_mask, adj, mask, is_directed, batch_size, max_num_nodes, soft_sampling: float, training: bool,
                           clustering_loss_weight: float, num_mc_samples: 1, use_global_clusters: bool,
@@ -587,26 +636,6 @@ class MonteCarloBlock(PoolBlock):
             self.final_bottleneck = torch.nn.Linear(embedding_sizes[-1], final_bottleneck)
         else:
             self.final_bottleneck = None
-        self.cluster_colors = torch.tensor([
-            [244, 67, 54],
-            [156, 39, 176],
-            [63, 81, 181],
-            [3, 169, 244],
-            [0, 150, 136],
-            [139, 195, 74],
-            [255, 235, 59],
-            [255, 152, 0],
-            [121, 85, 72],
-            [96, 125, 139],
-            [233, 30, 99],
-            [103, 58, 183],
-            [33, 150, 243],
-            [0, 188, 212],
-            [76, 175, 80],
-            [205, 220, 57],
-            [255, 193, 7],
-            [255, 87, 34],
-            [158, 158, 158]], dtype=torch.float)
         if self.perturbation is not None and self.num_mc_samples != 1 and self.transparency != 1 and custom_logger.cpu_workers > 0:
             self.pool = ProcessPoolExecutor(max_workers=custom_logger.cpu_workers)
 
@@ -622,6 +651,9 @@ class MonteCarloBlock(PoolBlock):
             # changes before starting the next round of training to avoid the test data influencing the training
             self.seen_embeddings = torch.cat((self.seen_embeddings, x[mask].detach()), dim=0)
         return x
+
+    def perturb(self, x: torch.Tensor):
+        return self.perturbation(x) if self.train else x
 
     def hard_fn(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None):
         num_mc_samples = self.num_mc_samples if self.training and self.transparency == 1 else 1
@@ -646,14 +678,14 @@ class MonteCarloBlock(PoolBlock):
                 for sample in range(num_mc_samples):
                     # Note that adj is only modified for soft sampling. batch_s is of size [batch_size]
                     ass_s, conc_ass_s, dist_s, prob_s, batch_s, self.last_num_clusters =\
-                        generate_assignments(self.perturbation(x[mask]).detach(), parallel=False)
+                        generate_assignments(self.perturb(x[mask]).detach(), parallel=False)
                     assignments[sample * batch_size:(sample + 1) * batch_size] = ass_s
                     concept_assignments[sample * batch_size:(sample + 1) * batch_size] = conc_ass_s
                     batch = torch.cat((batch, batch_s), dim=0)
             else:
                 generate_assignments = partial(generate_assignments, parallel=True)
                 try:
-                    res = self.pool.map(generate_assignments, [self.perturbation(x[mask].detach()) for _ in range(num_mc_samples)])
+                    res = self.pool.map(generate_assignments, [self.perturb(x[mask].detach()) for _ in range(num_mc_samples)])
                     for sample, (ass_s, conc_ass_s, dist_s, prob_s, batch_s, self.last_num_clusters) in enumerate(res):
                         assignments[sample * batch_size:(sample + 1) * batch_size] = ass_s
                         concept_assignments[sample * batch_size:(sample + 1) * batch_size] = conc_ass_s
@@ -689,15 +721,6 @@ class MonteCarloBlock(PoolBlock):
     def forward(self, x: torch.Tensor, adj: torch.Tensor, mask=None, edge_weights=None):
         assert self.transparency == 1
         return self.hard_fn(self.preprocess(x, adj, mask, edge_weights), adj, mask, edge_weights)
-
-    def _ensure_min_colors(self, required_colors: int | torch.Tensor, purpose: str):
-        if self.cluster_colors.shape[0] < required_colors:
-            warnings.warn(
-                f"Only {self.cluster_colors.shape[0]} colors given to distinguish {required_colors} "
-                f"{purpose}! Extending with black colors.")
-            self.cluster_colors = torch.cat((self.cluster_colors,
-                                             torch.zeros(required_colors - self.cluster_colors.shape[0], 3,
-                                                         device=self.cluster_colors.device)), dim=0)
 
     def log_data(self, epoch: int, index: int):
         log({f"num_clusters_{index}": self.last_num_clusters}, step=epoch)
@@ -902,8 +925,8 @@ class MonteCarloBlock(PoolBlock):
         return self.embedding_sizes[-1] if self.final_bottleneck_dim is None else self.final_bottleneck_dim
 
 
-__all_dense__ = [DenseNoPoolBlock, DiffPoolBlock, PerturbedBlock, MonteCarloBlock]
-__all_sparse__ = [ASAPBlock]
+__all_dense__ = [DenseNoPoolBlock, DiffPoolBlock, MonteCarloBlock]
+__all_sparse__ = [ASAPBlock, SparseNoPoolBlock]
 
 
 def from_name(name: str, dense_data: bool):
