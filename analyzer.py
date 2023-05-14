@@ -1,4 +1,5 @@
 import math
+import warnings
 from dataclasses import dataclass
 from functools import partial
 from typing import Optional, Type, List, Sequence
@@ -31,7 +32,8 @@ import custom_logger
 
 
 class Analyzer():
-    def __init__(self, wandb_id: str, resume_last: bool, load_part: float = 1, train_loader: DataLoader = None, test_loader: DataLoader = None, val_loader: DataLoader = None, **overwrite_args):
+    def __init__(self, wandb_id: str, resume_last: bool, load_part: float = 1, train_loader: DataLoader = None,
+                 test_loader: DataLoader = None, val_loader: DataLoader = None, **overwrite_args):
         _train_loader, _val_loader, _test_loader = self.load_model(wandb_id, resume_last=resume_last, **overwrite_args)
         self.train_loader = _train_loader if train_loader is None else train_loader
         self.test_loader = _test_loader if test_loader is None else test_loader
@@ -49,6 +51,9 @@ class Analyzer():
         self.colors = np.array(
             ['#2c3e50', '#e74c3c', '#27ae60', '#3498db', '#CDDC39', '#f39c12', '#795548', '#8e44ad', '#3F51B5',
              '#7f8c8d', '#e84393', '#607D8B', '#8e44ad', '#009688'])
+        if "batch_size" in overwrite_args:
+            warnings.warn("Overwriting the batch size can have a significant impact on the clustering and therefore "
+                          "the inference behaviour!")
 
     def load_model(self, wandb_id: str,**overwrite_args):
         self.model, self.config, self.dataset_wrapper, train_loader, val_loader, test_loader =\
@@ -106,13 +111,13 @@ class Analyzer():
             else:
                 res["x"] = torch.empty(self.dataset_wrapper.num_nodes_total, num_node_features)
         if "adj" in load_names:
-            res["adj"] = torch.zeros(set_size, max_nodes, max_nodes, dtpye=torch.int)
+            res["adj"] = torch.zeros(set_size, max_nodes, max_nodes, dtype=torch.int)
         if "edge_index" in load_names:
-            res["edge_index"] = torch.zeros(2, self.dataset_wrapper.num_edges_total, dtpye=torch.int)
+            res["edge_index"] = torch.zeros(2, self.dataset_wrapper.num_edges_total, dtype=torch.int)
         if "mask" in load_names:
-            res["mask"] = torch.zeros(set_size, max_nodes, dtpye=torch.bool)
+            res["mask"] = torch.zeros(set_size, max_nodes, dtype=torch.bool)
         if "batch" in load_names:
-            res["batch"] = torch.zeros(set_size, dtpye=torch.long)
+            res["batch"] = torch.zeros(set_size, dtype=torch.long)
 
         sample_i = 0
         node_i = 0
@@ -166,7 +171,7 @@ class Analyzer():
                 for key in ["pooling_assignments", "pooling_activations", "adjs_or_edge_indices", "all_batch_or_mask",
                             "input_embeddings"]:
                     # TODO support sparse
-                    if key in load_names:
+                    if "info_" + key in load_names:
                         if "info_" + key in res:
                             for i, e in enumerate(getattr(info, key)):
                                 if e is not None:
@@ -206,9 +211,9 @@ class Analyzer():
             torch.manual_seed(seed)
             np.random.seed(seed)
             train_data = self.load_required_data(self.train_loader, data_part, "train",
-                                                 ["x", "target", "pooling_assignments"])
+                                                 ["x", "target", "info_pooling_assignments"])
             test_data = self.load_required_data(self.test_loader, data_part, "test",
-                                                 ["x", "target", "pooling_assignments"])
+                                                 ["x", "target", "info_pooling_assignments"])
             enumerate_feat = 2 ** torch.arange(train_data["x"].shape[-1],
                                                device=train_data["x"].device)[None, None, :]
             all_train_assignments = [torch.sum(train_data["x"].int() * enumerate_feat, dim=-1)] +\
@@ -250,18 +255,29 @@ class Analyzer():
         # else:
         #     raise NotImplementedError()
 
+    def _ensure_min_colors(self, required_colors: int | torch.Tensor):
+        if self.colors.shape[0] < required_colors:
+            warnings.warn(
+                f"Only {self.colors.shape[0]} colors but {required_colors} needed! Extending with black colors.")
+            self.colors = np.concatenate((self.colors, np.array((required_colors - self.colors.shape[0]) * ["#000"])),
+                                         axis=0)
+
     def plot_clusters(self, cluster_alg: Optional[Type[ClusterAlgWrapper]] = None, save_path: Optional[str] = None,
-                      dim_reduc: Type[BaseEstimator] = TSNE, **cluster_alg_kwargs):
+                      dim_reduc: Type[BaseEstimator] = TSNE, data_part: float = 1.0, **cluster_alg_kwargs):
         """
         :param cluster_alg: Type of a clustering algorithm to use. If provided, this will be fitted for every pooling
         layer. Otherwise, only pooling layers that use clustering will be shown (with the cluster algorithm fitted to
         the train as of the last pass).
         :return:
         """
-        pool_acts_train = self.train_info.pooling_activations
-        masks_train = [self.train_data.mask] + self.train_info.all_batch_or_mask
-        pool_acts_test = self.test_info.pooling_activations
-        masks_test = [self.test_data.mask] + self.test_info.all_batch_or_mask
+        train_data = self.load_required_data(self.train_loader, data_part, "train",
+                                ["mask", "info_pooling_activations", "info_all_batch_or_mask"])
+        pool_acts_train = train_data["info_pooling_activations"]
+        masks_train = [train_data["mask"]] + train_data["info_all_batch_or_mask"]
+        test_data = self.load_required_data(self.test_loader, data_part, "train",
+                                            ["mask", "info_pooling_activations", "info_all_batch_or_mask"])
+        pool_acts_test = test_data["info_pooling_activations"]
+        masks_test = [test_data["mask"]] + test_data["info_all_batch_or_mask"]
         for i in range(len(pool_acts_train)):
             if cluster_alg is None:
                 if not hasattr(self.model.graph_network.pool_blocks[i], "cluster_alg"):
@@ -271,15 +287,16 @@ class Analyzer():
                 cluster_alg_used = cluster_alg(**cluster_alg_kwargs)
                 cluster_alg_used.fit(pool_acts_train[i][masks_train[i]])
 
-            num_train_nodes = pool_acts_train[i][masks_train[i]].shape[0]
-            num_nodes = num_train_nodes + pool_acts_test[i][masks_test[i]].shape[0]
+            num_train_nodes = math.ceil(pool_acts_train[i][masks_train[i]].shape[0] * data_part)
+            num_nodes = num_train_nodes + math.ceil(pool_acts_test[i][masks_test[i]].shape[0] * data_part)
             all_points = torch.cat(
-                (pool_acts_train[i][masks_train[i]], pool_acts_test[i][masks_test[i]], cluster_alg_used.centroids),
-                dim=0).detach().cpu()
+                (pool_acts_train[i][masks_train[i]].to(custom_logger.device), pool_acts_test[i][masks_test[i]].to(custom_logger.device), cluster_alg_used.centroids),
+                dim=0).detach()
             assignments = cluster_alg_used.predict(all_points).cpu()
+            all_points = all_points.cpu()
 
             coords = dim_reduc(n_components=2).fit_transform(X=all_points)
-
+            self._ensure_min_colors(torch.max(assignments) + 1)
             fig, ax = plt.subplots()
             # o p s
             ax.scatter(coords[:num_train_nodes, 0], coords[:num_train_nodes, 1],
