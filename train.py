@@ -465,7 +465,7 @@ if __name__ == "__main__":
     parser.add_argument('--save_path', type=str,
                         default=os.path.join("models", datetime.now().strftime("%d-%m-%Y_%H-%M-%S")),
                         help='The path to save the checkpoint to. Will be models/dd-mm-YY_HH-MM-SS.pt by default.')
-    parser.add_argument('--wandb_dir', type=str,
+    parser.add_argument('--wandb_dir', type=str, dest="wandb_dir",
                         default="wandb", help='Where to save the wandb files locally.')
     parser.add_argument('--wandb_tags', type=str, nargs='+',
                         default=[], help='Additional tags to add to wandb')

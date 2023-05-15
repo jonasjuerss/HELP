@@ -12,9 +12,9 @@ def init(args):
         wandb_args = dict(
             project=wandb_project,
             entity=wandb_entity,
-            dir=args.wandb_dir,
+            dir=args.wandb_dir if hasattr(args, "wandb_dir") else "wandb",
             config=args,
-            tags=[args.dataset["_type"][:-7]] + args.wandb_tags
+            tags=[args.dataset["_type"][:-7]] + (args.wandb_tags if hasattr(args, "wandb_tags") else [])
         )
         if args.wandb_name is not None:
             wandb_args["name"] = args.wandb_name
