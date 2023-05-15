@@ -83,7 +83,7 @@ def dense_components(adj: torch.Tensor, mask: Optional[torch.Tensor] = None, con
     # [batch_size] minimum component index for each batch element
     component_starts = scatter(component, batch, reduce="min")
     # [batch_size, max_num_components] (where max_num_components is the maximum number of components in any single batch element)
-    dense_component, mask_new = to_dense_batch(component, batch, max_num_nodes=adj.shape[-1])
+    dense_component, mask_new = to_dense_batch(component, batch, max_num_nodes=adj.shape[-1], fill_value=-1)
     # Subtract start component for each batch element and add 1 as 0 is a dummy concept for masked nodes and the actual
     # ones start at 1.
     dense_component = dense_component - component_starts[:, None] + 1
