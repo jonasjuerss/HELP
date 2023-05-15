@@ -465,6 +465,10 @@ if __name__ == "__main__":
     parser.add_argument('--save_path', type=str,
                         default=os.path.join("models", datetime.now().strftime("%d-%m-%Y_%H-%M-%S")),
                         help='The path to save the checkpoint to. Will be models/dd-mm-YY_HH-MM-SS.pt by default.')
+    parser.add_argument('--wandb_dir', type=str,
+                        default="wandb", help='Where to save the wandb files locally.')
+    parser.add_argument('--wandb_tags', type=str, nargs='+',
+                        default=[], help='Additional tags to add to wandb')
     parser.add_argument('--device', type=str, default="cuda",
                         help='The device to train on. Allows to use CPU or different GPUs.')
     parser.set_defaults(use_wandb=True)

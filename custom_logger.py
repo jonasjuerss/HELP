@@ -1,4 +1,4 @@
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, List
 
 import wandb
 device = None
@@ -12,9 +12,9 @@ def init(args):
         wandb_args = dict(
             project=wandb_project,
             entity=wandb_entity,
-            dir="/tmp/thesis",
+            dir=args.wandb_dir,
             config=args,
-            tags=[args.dataset["_type"][:-7]]
+            tags=[args.dataset["_type"][:-7]] + args.wandb_tags
         )
         if args.wandb_name is not None:
             wandb_args["name"] = args.wandb_name
