@@ -37,11 +37,15 @@ from data_generation.dataset_wrappers import DatasetWrapper, CustomDatasetWrappe
 from data_generation.deserializer import from_dict
 from data_generation.motifs import BinaryTreeMotif, HouseMotif, FullyConnectedMotif, CircleMotif
 from plot_gradient_flow import plot_grad_flow
-
-import resource
-resource.setrlimit(
-    resource.RLIMIT_CORE, (resource.RLIM_INFINITY, resource.RLIM_INFINITY)
-)
+try:
+    import resource
+    resource.setrlimit(
+        resource.RLIMIT_CORE, (resource.RLIM_INFINITY, resource.RLIM_INFINITY)
+    )
+except:
+    # https://github.com/wandb/wandb/issues/2825
+    print("Didn't find resource module and therefore can't apply fix for wandb logging potentially dying."
+          "This is expected on non-unix machines.")
 
 
 DENSE_CONV_TYPES: typing.List[typing.Type[torch.nn.Module]] = [DenseGCNConv, CustomDenseGINConv]
