@@ -38,6 +38,12 @@ from data_generation.deserializer import from_dict
 from data_generation.motifs import BinaryTreeMotif, HouseMotif, FullyConnectedMotif, CircleMotif
 from plot_gradient_flow import plot_grad_flow
 
+import resource
+resource.setrlimit(
+    resource.RLIMIT_CORE, (resource.RLIM_INFINITY, resource.RLIM_INFINITY)
+)
+
+
 DENSE_CONV_TYPES: typing.List[typing.Type[torch.nn.Module]] = [DenseGCNConv, CustomDenseGINConv]
 SPARSE_CONV_TYPES = [GCNConv]
 VALID_CONV_NAMES = [c.__name__ for c in DENSE_CONV_TYPES + SPARSE_CONV_TYPES]
@@ -368,7 +374,7 @@ def main(args, **kwargs):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--lr', type=float, default=0.01,
+    parser.add_argument('--lr', type=float, default=0.001,
                         help='The Adam learning rate to use.')
     parser.add_argument('--pooling_loss_weight', type=float, default=0.5,
                         help='The weight of the pooling loss.')
