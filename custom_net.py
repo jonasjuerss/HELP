@@ -21,6 +21,10 @@ class InferenceInfo:
     """The assignments from nodes to clusters they were pooled to (takes different forms depending on the pooling 
     method). For MonteCarlo: [batch_size, max_num_nodes] with integer values corresponding to the assigned cluster or
     -1 for masked nodes."""
+    node_assignments: List[torch.Tensor]
+    """The assignments from nodes to new nodes they were pooled to (takes different forms depending on the pooling 
+    method). For MonteCarlo: [batch_size, max_num_nodes] with integer values corresponding to the assigned new node + 1
+    or 0 for masked nodes."""
     pooling_activations: List[torch.Tensor]
     """The input embeddings to the pooling operation (after applying the GNN layers)"""
     adjs_or_edge_indices: List[torch.Tensor]
@@ -149,15 +153,15 @@ class CustomNet(torch.nn.Module, abc.ABC):
         elif ndim > 3:
             print("Multiple batch dimensions currently might not work as expected!")
 
-        concepts, probabilities, pooling_loss, pooling_assignments, pooling_activations, batch_or_mask,\
-            adjs_or_edge_indices, all_batch_or_mask, input_embeddings, skipped_result =\
+        concepts, probabilities, pooling_loss, pooling_assignments, node_assignments, pooling_activations,\
+            batch_or_mask, adjs_or_edge_indices, all_batch_or_mask, input_embeddings, skipped_result =\
             self.graph_network(data, collect_info=collect_info)
         if skipped_result is None:
             skipped_result = self.merge_layer(input=concepts, batch_or_mask=batch_or_mask)
         x = self.output_layer(skipped_result)
         if collect_info:
-            info = InferenceInfo(pooling_assignments, pooling_activations, adjs_or_edge_indices, all_batch_or_mask,
-                                 input_embeddings)
+            info = InferenceInfo(pooling_assignments, node_assignments, pooling_activations, adjs_or_edge_indices,
+                                 all_batch_or_mask, input_embeddings)
         else:
             info = None
         return F.log_softmax(x, dim=1), probabilities, concepts, pooling_loss, info

@@ -44,7 +44,7 @@ try:
     )
 except:
     # https://github.com/wandb/wandb/issues/2825
-    print("Didn't find resource module and therefore can't apply fix for wandb logging potentially dying."
+    print("Didn't find resource module and therefore can't apply fix for wandb logging potentially dying. "
           "This is expected on non-unix machines.")
 
 

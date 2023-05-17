@@ -139,12 +139,13 @@ class DenseGraphPoolingNetwork(GraphPoolingNetwork):
         probabilities = None
         if collect_info:
             pooling_assignments = []
+            node_assignments = []
             pooling_activations = []
             masks = []
             adjs = []
             input_embeddings = []
         else:
-            pooling_assignments = pooling_activations = masks = adjs = input_embeddings = None
+            pooling_assignments = node_assignments = pooling_activations = masks = adjs = input_embeddings = None
 
         # TODO incorporate in sparse or finally merge them
         skipped_result = None
@@ -157,21 +158,22 @@ class DenseGraphPoolingNetwork(GraphPoolingNetwork):
                 skipped_result = skipped_res
             else:
                 res = block(x, adj=adj, mask=mask)
-                x, adj, _, probs, temp_loss, pool, last_embedding, mask = res
+                x, adj, _, probs, temp_loss, pool, node_ass, last_embedding, mask = res
                 results.append(res)
 
         for res in results:
-            x_tmp, adj, _, probs, temp_loss, pool, last_embedding, mask = res
+            x_tmp, adj, _, probs, temp_loss, pool, node_ass, last_embedding, mask = res
             pooling_loss += temp_loss
             if collect_info:
                 pooling_assignments.append(pool)
+                node_assignments.append(node_ass)
                 pooling_activations.append(last_embedding)
                 masks.append(mask)
                 adjs.append(adj)
                 input_embeddings.append(x_tmp)
             if self.use_probability_weights and probs is not None:
                 probabilities = probs if probabilities is None else probabilities * probs
-        return x, probabilities, pooling_loss, pooling_assignments, pooling_activations, mask, adjs, masks, \
+        return x, probabilities, pooling_loss, pooling_assignments, node_assignments, pooling_activations, mask, adjs, masks, \
             input_embeddings, skipped_result
 
 
@@ -191,25 +193,28 @@ class SparseGraphPoolingNetwork(GraphPoolingNetwork):
         edge_weights = None
         if collect_info:
             pooling_assignments = []
+            node_assignments = []
             pooling_activations = []
             batches = []
             edge_indices = []
             input_embeddings = []
         else:
-            pooling_assignments = pooling_activations = batches = edge_indices = input_embeddings = None
+            pooling_assignments = node_assignments = pooling_activations = batches = edge_indices = input_embeddings\
+                = None
 
         for block in self.pool_blocks:
-            x, edge_index, edge_weights, probs, temp_loss, pool, last_embedding, batch = block(x, edge_index,
-                                                                                               batch,
-                                                                                               edge_weights=edge_weights)
+            x, edge_index, edge_weights, probs, temp_loss, pool, node_ass, last_embedding, batch = block(x, edge_index,
+                                                                                                         batch,
+                                                                                                         edge_weights=edge_weights)
             pooling_loss += temp_loss
             if collect_info:
                 pooling_assignments.append(pool)
+                node_assignments.append(node_ass)
                 pooling_activations.append(last_embedding)
                 batches.append(batch)
                 edge_indices.append(edge_index)
                 input_embeddings.append(x)
             if self.use_probability_weights and probs is not None:
                 probabilities = probs if probabilities is None else probabilities * probs
-        return x, probabilities, pooling_loss, pooling_assignments, pooling_activations, batch, edge_indices, batches, \
-            input_embeddings, None
+        return x, probabilities, pooling_loss, pooling_assignments, node_assignments, pooling_activations, batch,\
+            edge_indices, batches, input_embeddings, None

@@ -1,3 +1,4 @@
+import dataclasses
 import math
 import warnings
 from dataclasses import dataclass
@@ -8,6 +9,7 @@ import matplotlib
 import networkx as nx
 import numpy as np
 import torch_geometric
+import wandb
 from functorch import vmap
 from matplotlib import pylab, pyplot as plt
 import torch
@@ -23,21 +25,27 @@ from sklearn.tree import DecisionTreeClassifier
 from tqdm import tqdm
 
 from clustering_wrappers import ClusterAlgWrapper
-from custom_net import InferenceInfo
+from color_utils import ColorUtils
+from custom_net import InferenceInfo, CustomNet
 from data_generation.custom_dataset import HierarchicalMotifGraphTemplate
 from data_generation.dataset_wrappers import CustomDatasetWrapper
+from graphutils import adj_to_edge_index
+from poolblocks.poolblock import DenseNoPoolBlock, SparseNoPoolBlock, DiffPoolBlock, MonteCarloBlock
 from train import main
 import custom_logger
 
 
 
 class Analyzer():
-    def __init__(self, wandb_id: str, resume_last: bool, load_part: float = 1, train_loader: DataLoader = None,
-                 test_loader: DataLoader = None, val_loader: DataLoader = None, **overwrite_args):
-        _train_loader, _val_loader, _test_loader = self.load_model(wandb_id, resume_last=resume_last, **overwrite_args)
+    def __init__(self, wandb_id: str, resume_last: bool, train_loader: DataLoader = None,
+                 test_loader: DataLoader = None, val_loader: DataLoader = None, use_wandb: bool = False, **overwrite_args):
+        _train_loader, _val_loader, _test_loader = self.load_model(wandb_id, use_wandb=use_wandb,
+                                                                   resume_last=resume_last, **overwrite_args)
         self.train_loader = _train_loader if train_loader is None else train_loader
         self.test_loader = _test_loader if test_loader is None else test_loader
         self.val_loader = _val_loader if val_loader is None else val_loader
+        self.using_wandb = False
+        self.step = 0
 
         # self.train_data, self.train_out, self.train_concepts, train_info, self.train_y_pred = \
         #     self.load_whole_dataset(_train_loader if train_loader is None else train_loader, load_part, "train")
@@ -46,19 +54,16 @@ class Analyzer():
         # self.train_info: InferenceInfo = train_info
         # self.test_info: InferenceInfo = test_info
 
-        #self.colors = np.array([matplotlib.colors.rgb2hex(c) for c in pylab.get_cmap("tab20").colors])
+        #hex_colors = np.array([matplotlib.colors.rgb2hex(c) for c in pylab.get_cmap("tab20").colors])
         self.input_dim : int = self.model.graph_network.pool_blocks[0].input_dim
-        self.colors = np.array(
-            ['#2c3e50', '#e74c3c', '#27ae60', '#3498db', '#CDDC39', '#f39c12', '#795548', '#8e44ad', '#3F51B5',
-             '#7f8c8d', '#e84393', '#607D8B', '#8e44ad', '#009688'])
         if "batch_size" in overwrite_args:
             warnings.warn("Overwriting the batch size can have a significant impact on the clustering and therefore "
                           "the inference behaviour!")
 
-    def load_model(self, wandb_id: str,**overwrite_args):
+    def load_model(self, wandb_id: str, use_wandb: bool, **overwrite_args):
         self.model, self.config, self.dataset_wrapper, train_loader, val_loader, test_loader =\
-            main(dict(resume=wandb_id, save_path="models/dummy.pt"), use_wandb=False, num_epochs=0, shuffle=False,
-                 **overwrite_args)
+            main(dict(resume=wandb_id, save_path="models/dummy.pt"), use_wandb=use_wandb, num_epochs=0, shuffle=False,
+                 wandb_tags=["Analyzer"], **overwrite_args)
         self.model.eval()
         return train_loader, val_loader, test_loader
 
@@ -90,7 +95,6 @@ class Analyzer():
                 + tuple(slice(0, inp.shape[j]) for j in range(dim + 1, inputs[0].ndim))] = inp
             start += inp.shape[dim]
         return res
-
 
     def load_required_data(self, data_loader: DataLoader, load_part: float, mode: str, load_names: List[str]):
         set_size = math.floor(load_part * len(data_loader.dataset))
@@ -168,8 +172,7 @@ class Analyzer():
                     else:
                         res["concepts"] = concepts
 
-                for key in ["pooling_assignments", "pooling_activations", "adjs_or_edge_indices", "all_batch_or_mask",
-                            "input_embeddings"]:
+                for key in [f.name for f in dataclasses.fields(InferenceInfo)]:
                     # TODO support sparse
                     if "info_" + key in load_names:
                         if "info_" + key in res:
@@ -185,6 +188,99 @@ class Analyzer():
 
         print(f"Loaded {set_size} {mode} samples. Accuracy {100 * correct / set_size:.2f}%")
         return res # data, out, concepts, info, y_pred
+
+    def log_graphs(self, samples_per_concept: int = 3):
+        train_data = self.load_required_data(self.train_loader, samples_per_concept / len(self.train_loader.dataset),
+                                             "train",
+                                             ["x", "mask", "adj", "info_pooling_assignments",
+                                              "info_pooling_activations", "info_all_batch_or_mask",
+                                              "info_adjs_or_edge_indices", "info_node_assignments"])
+        self.general_log_graphs(self.model, samples_per_concept=samples_per_concept, **train_data)
+
+    @staticmethod
+    def deterministic_concept_assignments(model: CustomNet, info_pooling_assignments: torch.Tensor) -> List[torch.Tensor]:
+        res = []
+        for i, ass in enumerate(info_pooling_assignments):
+            if model.graph_network.pool_blocks[i].__class__ == DiffPoolBlock:
+                res.append(torch.argmax(ass, dim=-1))
+            elif model.graph_network.pool_blocks[i].__class__ in [MonteCarloBlock]:
+                res.append(ass)
+            elif model.graph_network.pool_blocks[i].__class__ not in [SparseNoPoolBlock, DenseNoPoolBlock]:
+                raise NotImplementedError(f"PoolBlock type not supported {model.graph_network.pool_blocks[i].__class__}")
+        return res
+
+    @staticmethod
+    def deterministic_node_assignments(model: CustomNet, det_pooling_assignments: torch.Tensor,
+                                       info_node_assignments: torch.Tensor, check=True) -> List[
+        torch.Tensor]:
+        res = []
+        for i, (block, ass) in enumerate(zip(model.graph_network.pool_blocks, info_node_assignments)):
+            if block.__class__ == DiffPoolBlock:
+                res.append(torch.arange(block.num_output_nodes, device=ass.device).repeat(ass.shape[0], 1))
+            elif block.__class__ in [MonteCarloBlock]:
+                scat = scatter(det_pooling_assignments[i], ass, reduce="min", dim=-1)[:, 1:]
+                res.append(scat)
+                if check:
+                    assert torch.allclose(scat, scatter(det_pooling_assignments[i], ass,
+                                                        reduce="max", dim=-1)[:, 1:])
+            elif block.__class__ not in [SparseNoPoolBlock, DenseNoPoolBlock]:
+                raise NotImplementedError(
+                    f"PoolBlock type not supported {model.graph_network.pool_blocks[i].__class__}")
+        return res
+
+    @staticmethod
+    def general_log_graphs(model: CustomNet, x: torch.Tensor, adj: torch.Tensor,
+                                      mask: torch.Tensor, info_pooling_activations: torch.Tensor,
+                                      info_all_batch_or_mask: torch.Tensor, info_node_assignments: torch.Tensor,
+                                      info_adjs_or_edge_indices: torch.Tensor, info_pooling_assignments: torch.Tensor,
+                                      samples_per_concept: int, epoch: Optional[int] = None):
+        # IMPORTANT: Here it is crucial to have batches of the size used during training in the forward pass
+        # if using only a single example, some concepts might not be present but we still enforce the same number of
+        # clusters
+        node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "border_color", "label", "activations"])
+        edge_table = wandb.Table(["graph", "pool_step", "source", "target"])
+        with torch.no_grad():
+            # concepts: [batch_size, max_num_nodes_final_layer, embedding_dim_out_final_layer] the node embeddings of the final graph
+            pool_activations = [x] + info_pooling_activations
+            adjs = [adj] + info_adjs_or_edge_indices
+            masks = [mask] + [torch.ones(*a.shape[:2], dtype=torch.bool, device=a.device) if m is None else m
+                              for m, a in zip(info_all_batch_or_mask, info_adjs_or_edge_indices)]
+            pool_assignments = Analyzer.deterministic_concept_assignments(model, info_pooling_assignments)
+            node_concepts = [torch.argmax(x, dim=-1)]\
+                            + Analyzer.deterministic_node_assignments(model, pool_assignments, info_node_assignments)
+
+            for pool_step in range(len(pool_assignments)):
+                for graph_i in range(samples_per_concept):
+                    # Calculate concept assignment colors
+                    # [num_nodes] (with batch dimension and masked nodes removed)
+                    assignment = pool_assignments[pool_step][graph_i][masks[pool_step][graph_i]].detach().cpu()
+                    ColorUtils.ensure_min_rgb_colors(torch.max(assignment) + 1)
+                    # [num_nodes, 3] (intermediate dimensions: num_nodes x num_clusters x 3)
+                    concept_colors = ColorUtils.rgb_colors[assignment, :]
+
+                    node_assignment = node_concepts[pool_step][graph_i][masks[pool_step][graph_i]].detach().cpu()
+                    ColorUtils.ensure_min_rgb_colors(torch.max(node_assignment) + 1)
+                    # [num_nodes, 3] (intermediate dimensions: num_nodes x num_clusters x 3)
+                    feature_colors = ColorUtils.rgb_colors[node_assignment, :]
+                    for i, i_old in enumerate(masks[pool_step][graph_i].nonzero().squeeze(1)):
+                        node_table.add_data(graph_i, pool_step, i, feature_colors[i, 0].item(),
+                                            feature_colors[i, 1].item(), feature_colors[i, 2].item(),
+                                            ColorUtils.rgb2hex_tensor(concept_colors[i, :]),
+                                            f"Cluster {assignment[i]}",
+                                            ", ".join([f"{m.item():.2f}" for m in
+                                                       pool_activations[pool_step][graph_i, i_old, :].cpu()]))
+
+                    edge_index, _, _ = adj_to_edge_index(adjs[pool_step][graph_i:graph_i+1, :, :],
+                                                         masks[pool_step][graph_i:graph_i+1])
+                    for i in range(edge_index.shape[1]):
+                        edge_table.add_data(graph_i, pool_step, edge_index[0, i].item(), edge_index[1, i].item())
+
+        custom_logger.log(dict(
+            # graphs_table=graphs_table
+            node_table=node_table,
+            edge_table=edge_table
+        ), *({} if epoch is None else {"step": epoch}))
+
 
     @staticmethod
     def _decision_tree_acc(X_train: np.ndarray, Y_train: np.ndarray, X_test: Optional[np.ndarray] = None,
@@ -217,9 +313,11 @@ class Analyzer():
             enumerate_feat = 2 ** torch.arange(train_data["x"].shape[-1],
                                                device=train_data["x"].device)[None, None, :]
             all_train_assignments = [torch.sum(train_data["x"].int() * enumerate_feat, dim=-1)] +\
-                                    train_data["info_pooling_assignments"]
-            all_test_assignments = [torch.sum(test_data["x"].int() * enumerate_feat, dim=-1)] +\
-                                   test_data["info_pooling_assignments"]
+                                    Analyzer.deterministic_concept_assignments(self.model,
+                                                                               train_data["info_pooling_assignments"])
+            all_test_assignments = [torch.sum(test_data["x"].int() * enumerate_feat, dim=-1)] + \
+                                   Analyzer.deterministic_concept_assignments(self.model,
+                                                                              test_data["info_pooling_assignments"])
             result = []
             for pool_step, (train_assignments, test_assignments) in enumerate(zip(all_train_assignments,
                                                                                   all_test_assignments)):
@@ -255,13 +353,6 @@ class Analyzer():
         # else:
         #     raise NotImplementedError()
 
-    def _ensure_min_colors(self, required_colors: int | torch.Tensor):
-        if self.colors.shape[0] < required_colors:
-            warnings.warn(
-                f"Only {self.colors.shape[0]} colors but {required_colors} needed! Extending with black colors.")
-            self.colors = np.concatenate((self.colors, np.array((required_colors - self.colors.shape[0]) * ["#000"])),
-                                         axis=0)
-
     def plot_clusters(self, cluster_alg: Optional[Type[ClusterAlgWrapper]] = None, save_path: Optional[str] = None,
                       dim_reduc: Type[BaseEstimator] = TSNE, data_part: float = 1.0, **cluster_alg_kwargs):
         """
@@ -296,17 +387,17 @@ class Analyzer():
             all_points = all_points.cpu()
 
             coords = dim_reduc(n_components=2).fit_transform(X=all_points)
-            self._ensure_min_colors(torch.max(assignments) + 1)
+            ColorUtils.ensure_min_hex_colors(torch.max(assignments) + 1)
             fig, ax = plt.subplots()
             # o p s
             ax.scatter(coords[:num_train_nodes, 0], coords[:num_train_nodes, 1],
-                       c=self.colors[assignments[:num_train_nodes]],
+                       c=ColorUtils.hex_colors[assignments[:num_train_nodes]],
                        marker='s', s=2, label="Train embeddings")
             ax.scatter(coords[num_train_nodes:num_nodes, 0], coords[num_train_nodes:num_nodes, 1],
-                       c=self.colors[assignments[num_train_nodes:num_nodes]],
+                       c=ColorUtils.hex_colors[assignments[num_train_nodes:num_nodes]],
                        marker='p', s=2, label="Test embeddings")
             ax.scatter(coords[num_nodes:, 0], coords[num_nodes:, 1],
-                       c=self.colors[assignments[num_nodes:]],
+                       c=ColorUtils.hex_colors[assignments[num_nodes:]],
                        marker='o', s=10, label="Centroids")
             fig.show()
             if save_path is not None:
@@ -326,7 +417,7 @@ class Analyzer():
     #     for i in range(self.model.output_dim):
     #         # Note, we could also evaluate how the model classifies (y_pred_all) instead of the ground truth (y_all) for explainability
     #         ax.scatter(coords[self.y_all_nodes == i, 0], coords[self.y_all_nodes == i, 1],
-    #                    c=self.colors[clusters[self.y_all_nodes == i]],
+    #                    c=hex_colors[clusters[self.y_all_nodes == i]],
     #                    marker=markers[i], s=10)
 
     def draw_neighbourhood(self, ax, node_index: int):
@@ -374,7 +465,7 @@ class Analyzer():
         if color_concepts:
             # IMPORANT: Note that colors of clusters will not be consistent among different samples this way
             _, predicted_clusters = np.unique(np.argmax(self.x_out_all[mask], axis=1), return_inverse=True)
-            colors = self.colors[predicted_clusters]
+            colors = ColorUtils.hex_colors[predicted_clusters]
         else:
             colors = self.dataset_wrapper.get_node_colors(self.annot_all[mask])
         ax.set_title(
