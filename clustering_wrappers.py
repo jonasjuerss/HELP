@@ -193,7 +193,7 @@ class SequentialKMeansMeanShiftWrapper(torch.nn.Module, ClusterAlgWrapper):
             kmeans = KMeans(n_clusters=self.num_sketches)
             closest = kmeans.fit_predict(X)
             self.register_buffer("sketches", kmeans.centroids)
-            self.register_buffer("counts", torch.bincount(closest).float())
+            self.register_buffer("counts", torch.bincount(closest, minlength=self.num_sketches).float())
         else:
             # [num_points, num_sketches]
             closest = torch.argmin(torch.cdist(X, self.sketches), dim=1)
