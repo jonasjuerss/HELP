@@ -86,7 +86,7 @@ class DifferentiablePoolingNet(BlackBoxModule):
     def hard_fn(self, x: torch.Tensor, **kwargs) -> Tuple:
         return self.pool_blocks[0].hard_fn(x, **kwargs)
 
-    def postprocess(self, x, adj, _, __, ___, ____, _____, mask) -> Tuple:
+    def postprocess(self, x, adj, _, __, ___, ____, _____, ______, mask) -> Tuple:
         results = []
         for i, block in enumerate(self.pool_blocks[1:]):
             if block.__class__ == DifferentiablePoolingNet:
@@ -95,7 +95,7 @@ class DifferentiablePoolingNet(BlackBoxModule):
                 return final_res, results + following_results
             else:
                 res = block(x, adj=adj, mask=mask)
-                x, adj, _, _, _, _, _, mask = res
+                x, adj, _, _, _, _, _, _, mask = res
         return self.merge_layer(input=x, batch_or_mask=mask), results
 
     def forward(self, *args, **kwargs):
