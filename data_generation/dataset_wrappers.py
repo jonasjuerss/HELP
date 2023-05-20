@@ -1,7 +1,9 @@
 import abc
+import random
 import traceback
 from typing import Optional, List, Type
 
+import torch
 from torch_geometric.data import Dataset
 from torch_geometric.datasets import TUDataset
 from torch_geometric.transforms import ToDense, Compose, Constant
@@ -9,6 +11,7 @@ from torch_geometric.transforms import ToDense, Compose, Constant
 import data_generation.serializer as seri
 from data_generation.custom_dataset import CustomDataset
 from data_generation.transforms import RemoveEdgeFeatures
+from graphutils import data_to_dense
 
 
 class DatasetWrapper(seri.ArgSerializable, abc.ABC):
@@ -120,6 +123,27 @@ class PyGWrapper(DatasetWrapper, abc.ABC):
         dataset = dataset.shuffle()
         return dataset
 
+
+class PtFileWrapper(DatasetWrapper):
+
+    def __init__(self, path: str, args: dict):
+        self.data_dict = torch.load(path)
+        super().__init__(self.data_dict["num_classes"], self.data_dict["num_node_features"],
+                         self.data_dict.get("is_directed", False), max([d.num_nodes for d in self.data_dict["data"]]),
+                         args, self.data_dict.get("class_names", None))
+
+    def _get_dataset(self, dense: bool, min_nodes: int):
+        def condition(d):
+            return d.num_nodes >= min_nodes
+        transform = (lambda d: data_to_dense(d, max_nodes=self.max_nodes_per_graph)) if dense else (lambda x: x)
+        dataset = [transform(d) for d in self.data_dict["data"] if condition(d)]
+        random.Random(torch.seed()).shuffle(dataset)
+        return dataset
+
+
+class BBBPWrapper(PtFileWrapper):
+    def __init__(self):
+        super().__init__("data/bbbp.pt", dict())
 
 class TUDatasetWrapper(PyGWrapper):
     def __init__(self, dataset_name: str, is_directed: bool, remove_edge_fts: bool = False, args=None,

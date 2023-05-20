@@ -11,6 +11,7 @@ from torch_geometric.data import Data
 
 import data_generation.serializer as seri
 from data_generation.motifs import Motif, SparseGraph
+from graphutils import data_to_dense
 
 
 class CustomDataset(seri.ArgSerializable):
@@ -24,47 +25,6 @@ class CustomDataset(seri.ArgSerializable):
         self.dense_transform = transforms.ToDense(max_nodes)
         self.class_names = class_names
 
-    def _to_dense(self, data: Data):
-        """
-        This is basically the implementation from :class:`torch_geometric.transforms.ToDense` but without
-        converting the label to shape max_nodes if the graph consists of a single node
-        """
-        assert data.edge_index is not None
-
-        orig_num_nodes = data.num_nodes
-        if self.max_nodes is None:
-            num_nodes = orig_num_nodes
-        else:
-            assert orig_num_nodes <= self.max_nodes
-            num_nodes = self.max_nodes
-
-        if data.edge_attr is None:
-            edge_attr = torch.ones(data.edge_index.size(1), dtype=torch.float)
-        else:
-            edge_attr = data.edge_attr
-
-        size = torch.Size([num_nodes, num_nodes] + list(edge_attr.size())[1:])
-        adj = torch.sparse_coo_tensor(data.edge_index, edge_attr, size)
-        data.adj = adj.to_dense()
-        data.edge_index = None
-        data.edge_attr = None
-
-        data.mask = torch.zeros(num_nodes, dtype=torch.bool)
-        data.mask[:orig_num_nodes] = 1
-
-        if data.x is not None:
-            size = [num_nodes - data.x.size(0)] + list(data.x.size())[1:]
-            data.x = torch.cat([data.x, data.x.new_zeros(size)], dim=0)
-
-        if hasattr(data, "annotations") and data.annotations is not None:
-            size = [num_nodes - data.annotations.size(0)] + list(data.annotations.size())[1:]
-            data.annotations = torch.cat([data.annotations, data.annotations.new_zeros(size)], dim=0)
-
-        if data.pos is not None:
-            size = [num_nodes - data.pos.size(0)] + list(data.pos.size())[1:]
-            data.pos = torch.cat([data.pos, data.pos.new_zeros(size)], dim=0)
-
-        return data
     def sample(self, dense=False, condition: Callable[[Data], bool]=(lambda _: True)) -> Data:
         """
         Samples a data object for a single graph and class
@@ -74,7 +34,7 @@ class CustomDataset(seri.ArgSerializable):
         for _ in range(100):
             sample = self._sample()
             if condition(sample):
-                return self._to_dense(sample) if dense else sample
+                return data_to_dense(sample, max_nodes=self.max_nodes) if dense else sample
         raise TimeoutError("Could not find graph satisfying the given condition (e.g. minimum number of nodes) in 100 "
                            "attempts!")
     @abstractmethod
