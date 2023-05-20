@@ -212,6 +212,62 @@ class HouseMotif(Motif):
         edge_index = torch.tensor([[0, 1], [0, 2], [1, 2], [1, 3], [2, 4], [3, 4]], dtype=torch.long).T
         return SparseGraph(x, to_undirected(edge_index), annotations)
 
+class SplitHexagon(Motif):
+
+    def __init__(self, colors: List[int], num_colors: int, annotation: Optional[int] = None):
+        """
+          0
+         / \
+        1---2
+        |   |
+        3---4
+         \ /
+          5
+        """
+        super().__init__(num_colors, 6, 2 * 8,
+                         dict(colors=colors, num_colors=num_colors, annotation=annotation))
+        self.colors = colors
+        self.annotation = annotation
+
+    def sample(self) -> SparseGraph:
+        color = _random_list_entry(self.colors)
+        x = torch.zeros((6, self.num_colors))
+        x[:, color] = 1
+        if self.annotation:
+            annotations = torch.full((5,), self.annotation, dtype=torch.long)
+        else:
+            annotations = None
+        edge_index = torch.tensor([[0, 1], [0, 2], [1, 2], [1, 3], [2, 4], [3, 4], [3, 5], [4, 5]], dtype=torch.long).T
+        return SparseGraph(x, to_undirected(edge_index), annotations)
+
+
+class CrossHexagon(Motif):
+
+    def __init__(self, colors: List[int], num_colors: int, annotation: Optional[int] = None):
+        """
+          0
+         / \
+        1   2
+        | X |
+        3   4
+         \ /
+          5
+        """
+        super().__init__(num_colors, 6, 2 * 8,
+                         dict(colors=colors, num_colors=num_colors, annotation=annotation))
+        self.colors = colors
+        self.annotation = annotation
+
+    def sample(self) -> SparseGraph:
+        color = _random_list_entry(self.colors)
+        x = torch.zeros((6, self.num_colors))
+        x[:, color] = 1
+        if self.annotation:
+            annotations = torch.full((5,), self.annotation, dtype=torch.long)
+        else:
+            annotations = None
+        edge_index = torch.tensor([[0, 1], [0, 2], [1, 4], [1, 3], [2, 4], [3, 2], [3, 5], [4, 5]], dtype=torch.long).T
+        return SparseGraph(x, to_undirected(edge_index), annotations)
 
 class FullyConnectedMotif(Motif):
     def __init__(self, num_nodes: int, colors: List[int], num_colors: int, annotation: Optional[int] = None):
@@ -245,6 +301,7 @@ class FullyConnectedMotif(Motif):
         else:
             return f"FullyConnected ({self.num_nodes})"
 
+
 class CircleMotif(Motif):
     def __init__(self, num_nodes: int, colors: List[int], num_colors: int, annotation: Optional[int] = None):
         super().__init__(num_colors, num_nodes, 2 * num_nodes, dict(num_nodes=num_nodes, colors=colors,
@@ -267,6 +324,26 @@ class CircleMotif(Motif):
     @property
     def name(self):
         return f"Circle ({self.num_nodes})"
+
+
+class SetMotif(Motif):
+
+    def __init__(self, elements: List[Motif]):
+        super().__init__(elements[0].num_colors, sum(e.max_nodes for e in elements),
+                         sum(e.max_edges for e in elements),
+                         dict(elements=elements))
+        self.elements = elements
+
+    def sample(self) -> SparseGraph:
+        res = self.elements[0].sample()
+        for e in self.elements[1:]:
+            res = res.merged_with(e.sample())
+        return res
+
+    @property
+    def name(self):
+        return f"Set ({', '.join(e.name for e in self.elements)})"
+
 
 class BinaryTreeMotif(Motif):
     def __init__(self, max_depth: int, colors: List[int], num_colors: int, random: bool = True,

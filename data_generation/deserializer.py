@@ -3,11 +3,13 @@ import data_generation.custom_dataset as custom_dataset
 from data_generation import dataset_wrappers
 from poolblocks import perturbing_distributions
 
-__all__ = [motifs.HouseMotif, motifs.FullyConnectedMotif, motifs.BinaryTreeMotif, motifs.CircleMotif,
+__all__ = [motifs.HouseMotif, motifs.FullyConnectedMotif, motifs.BinaryTreeMotif, motifs.CircleMotif, motifs.SetMotif,
+           motifs.SplitHexagon, motifs.CrossHexagon,
 
            custom_dataset.UniqueMotifCategorizationDataset,
            custom_dataset.UniqueMultipleOccurrencesMotifCategorizationDataset,
            custom_dataset.UniqueHierarchicalMotifDataset,
+           custom_dataset.SimpleMotifCategorizationDataset,
 
            dataset_wrappers.CustomDatasetWrapper,
            dataset_wrappers.TUDatasetWrapper,

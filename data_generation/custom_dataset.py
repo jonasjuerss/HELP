@@ -4,6 +4,7 @@ from abc import abstractmethod
 from math import comb
 from typing import List, Tuple, Callable
 
+import numpy as np
 import torch
 from torch.distributions import Categorical
 from torch_geometric import transforms
@@ -40,6 +41,20 @@ class CustomDataset(seri.ArgSerializable):
     @abstractmethod
     def _sample(self) -> Data:
         pass
+
+
+class SimpleMotifCategorizationDataset(CustomDataset):
+
+    def __init__(self, motifs: List[Motif]):
+        super().__init__(max(m.max_nodes for m in motifs), len(motifs), motifs[0].num_colors, [m.name for m in motifs],
+                         dict(motifs=motifs))
+        self.motifs = motifs
+
+    def _sample(self) -> Data:
+        y = np.random.randint(self.num_classes)
+        graph = self.motifs[y].sample()
+        return Data(x=graph.x, edge_index=graph.edge_index, y=torch.tensor([y]), num_nodes=graph.num_nodes(),
+                    annotations=graph.annotations)
 
 
 class UniqueMultipleOccurrencesMotifCategorizationDataset(CustomDataset):
