@@ -148,7 +148,7 @@ def data_to_dense(data: Data, max_nodes: int):
     data.edge_attr = None
 
     data.mask = torch.zeros(max_nodes, dtype=torch.bool)
-    data.mask[:max_nodes] = 1
+    data.mask[:data.num_nodes] = 1
 
     if data.x is not None:
         size = [max_nodes - data.x.size(0)] + list(data.x.size())[1:]
