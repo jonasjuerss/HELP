@@ -205,6 +205,21 @@ current_dataset = UniqueHierarchicalMotifDataset([HouseMotif([0], [0], 1),
                                                  num_intermediate_nodes=1,
                                                  perturb=0.0)
 
+
+current_dataset = UniqueHierarchicalMotifDataset([HouseMotif([0], [0], 1),
+                                                  FullyConnectedMotif(4, [0], 1),
+                                                  CircleMotif(5, [0], 1)],
+                                                 [HouseMotif([0], [0], 1),
+                                                  FullyConnectedMotif(5, [0], 1),
+                                                  FullyConnectedMotif(3, [0], 1)],
+                                                 [1/3, 1/3, 1/3],
+                                                 [1/3, 1/3, 1/3],
+                                                 recolor_lowlevel=False,
+                                                 randomize_colors=False,
+                                                 one_hot_color=True,
+                                                 num_intermediate_nodes=1,
+                                                 perturb=0.0)
+
 # current_dataset = SimpleMotifCategorizationDataset([SetMotif([CircleMotif(3, [0], 1), CircleMotif(3, [0], 1)]),
 #                                                     CircleMotif(6, [0], 1)])
 
