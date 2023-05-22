@@ -332,21 +332,21 @@ class FullyConnectedMotif(Motif):
 
 
 class CircleMotif(Motif):
-    def __init__(self, num_nodes: int, colors: List[int], num_colors: int, max_nodes: Optional[int] = None,
+    def __init__(self, num_nodes: int, colors: List[int], num_colors: int, nodes_upper_bound: Optional[int] = None,
                  num_nodes_step: int = 1, annotation: Optional[int] = None):
-        super().__init__(num_colors, num_nodes if max_nodes is None else max_nodes,
-                         2 * (num_nodes if max_nodes is None else max_nodes),
-                         dict(num_nodes=num_nodes, colors=colors, num_colors=num_colors, max_nodes=max_nodes,
-                              num_nodes_step=num_nodes_step, annotation=annotation))
+        super().__init__(num_colors, num_nodes if nodes_upper_bound is None else nodes_upper_bound,
+                         2 * (num_nodes if nodes_upper_bound is None else nodes_upper_bound),
+                         dict(num_nodes=num_nodes, colors=colors, num_colors=num_colors,
+                              nodes_upper_bound=nodes_upper_bound, num_nodes_step=num_nodes_step, annotation=annotation))
         self.colors = colors
         self.num_nodes = num_nodes
         self.annotation = annotation
-        self.max_nodes = max_nodes
+        self.nodes_upper_bound = nodes_upper_bound
         self.num_nodes_step = num_nodes_step
 
     def sample(self) -> SparseGraph:
-        num_nodes = self.num_nodes if self.max_nodes is None\
-            else self.num_nodes + self.num_nodes_step * np.random.randint(1 + ((self.max_nodes - self.num_nodes)
+        num_nodes = self.num_nodes if self.nodes_upper_bound is None\
+            else self.num_nodes + self.num_nodes_step * np.random.randint(1 + ((self.nodes_upper_bound - self.num_nodes)
                                                                                // self.num_nodes_step))
         color = _random_list_entry(self.colors)
         x = torch.zeros((num_nodes, self.num_colors))
