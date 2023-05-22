@@ -209,8 +209,8 @@ current_dataset = UniqueHierarchicalMotifDataset([HouseMotif([0], [0], 1),
 #                                                     CircleMotif(6, [0], 1)])
 
 # The two hexagons themselves with the random node colors they have in the hierarchical dataset are distinguishable by WL
-current_dataset = SimpleMotifCategorizationDataset([IntermediateNodeMotif(CrossHexagon([0, 1, 2, 3, 4, 5], 7), 1, 6),
-                                                    IntermediateNodeMotif(SplitHexagon([0, 1, 2, 3, 4, 5], 7), 1, 6)])
+# current_dataset = SimpleMotifCategorizationDataset([IntermediateNodeMotif(CrossHexagon([0, 1, 2, 3, 4, 5], 7), 1, 6),
+#                                                     IntermediateNodeMotif(SplitHexagon([0, 1, 2, 3, 4, 5], 7), 1, 6)])
 # print(current_dataset.__dict__())
 
 # current_dataset = UniqueHierarchicalMotifDataset([HouseMotif([0], [0], 1),
