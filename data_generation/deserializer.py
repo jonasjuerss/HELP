@@ -19,6 +19,7 @@ __all__ = [motifs.HouseMotif, motifs.FullyConnectedMotif, motifs.BinaryTreeMotif
            dataset_wrappers.EnzymesWrapper,
            dataset_wrappers.PtFileWrapper,
            dataset_wrappers.BBBPWrapper,
+           dataset_wrappers.BBBPAtomWrapper,
 
            perturbing_distributions.GaussianPerturbation]
 
