@@ -145,6 +145,11 @@ class BBBPWrapper(PtFileWrapper):
     def __init__(self):
         super().__init__("data/bbbp.pt", dict())
 
+
+class BBBPAtomWrapper(PtFileWrapper):
+    def __init__(self):
+        super().__init__("data/bbbp_atom.pt", dict())
+
 class TUDatasetWrapper(PyGWrapper):
     def __init__(self, dataset_name: str, is_directed: bool, remove_edge_fts: bool = False, args=None,
                  class_names: Optional[List[str]] = None):
@@ -155,7 +160,12 @@ class TUDatasetWrapper(PyGWrapper):
 
 class MutagWrapper(TUDatasetWrapper):
     def __init__(self, remove_edge_fts: bool = True):
-        super().__init__("MUTAG", False, remove_edge_fts, dict(remove_edge_fts=remove_edge_fts), ["not mutagenic", "mutagenic"])
+        super().__init__("MUTAG", False, remove_edge_fts, dict(remove_edge_fts=remove_edge_fts),
+                         ["not mutagenic", "mutagenic"])
+        # self.label_map = np.array(['C', 'O', 'Cl', 'H', 'N', 'F', 'Br', 'S', 'P', 'I', 'Na', 'K', 'Li', 'Ca'])
+        #         self.color_map = np.array(
+        #             ['#2c3e50', '#e74c3c', '#27ae60', '#3498db', '#CDDC39', '#f39c12', '#795548', '#8e44ad', '#3F51B5',
+        #              '#7f8c8d', '#e84393', '#607D8B', '#8e44ad', '#009688'])
 
 
 class MutagenicityWrapper(TUDatasetWrapper):
