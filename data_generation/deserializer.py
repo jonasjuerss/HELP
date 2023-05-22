@@ -4,7 +4,7 @@ from data_generation import dataset_wrappers
 from poolblocks import perturbing_distributions
 
 __all__ = [motifs.HouseMotif, motifs.FullyConnectedMotif, motifs.BinaryTreeMotif, motifs.CircleMotif, motifs.SetMotif,
-           motifs.SplitHexagon, motifs.CrossHexagon,
+           motifs.SplitHexagon, motifs.CrossHexagon, motifs.ReplicationMotif, motifs.IntermediateNodeMotif,
 
            custom_dataset.UniqueMotifCategorizationDataset,
            custom_dataset.UniqueMultipleOccurrencesMotifCategorizationDataset,

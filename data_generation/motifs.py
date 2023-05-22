@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from typing import Union, Tuple, List, Optional
 
+import numpy as np
 import torch
 from torch import Tensor, LongTensor
 from torch_geometric.data import Data
@@ -108,6 +109,7 @@ class SparseGraph:
         mask = torch.any(self.edge_index != torch.tensor([[from_node], [to_node]]), dim=0)
         self.edge_index = self.edge_index[:, mask]
         return not torch.all(mask)
+
     def insert_node_on_edge(self, from_node: int, to_node: int, features: torch.Tensor, directed=False,
                             annotation: Optional[Tensor] = None):
         if not self.remove_edge(from_node, to_node) or (not directed and not self.remove_edge(to_node, from_node)):
@@ -148,7 +150,8 @@ class SparseGraph:
     def render(self, filename=None):
         data = Data(x=self.x, edge_index=self.edge_index)
         g = torch_geometric.utils.to_networkx(data, to_undirected=False)
-        nx.draw(g, with_labels=True)
+        color = torch.mean(self.x * torch.arange(self.num_features)[None, :], dim=-1)
+        nx.draw(g, node_color=color, with_labels=True)
         if filename is not None:
             plt.savefig(filename)
         plt.show()
@@ -226,13 +229,13 @@ class SplitHexagon(Motif):
         """
         super().__init__(num_colors, 6, 2 * 8,
                          dict(colors=colors, num_colors=num_colors, annotation=annotation))
-        self.colors = colors
+        self.colors = torch.tensor(colors)
         self.annotation = annotation
 
     def sample(self) -> SparseGraph:
-        color = _random_list_entry(self.colors)
+        color = self.colors[torch.randperm(self.colors.shape[0])[:6]]
         x = torch.zeros((6, self.num_colors))
-        x[:, color] = 1
+        x[torch.arange(6), color] = 1
         if self.annotation:
             annotations = torch.full((5,), self.annotation, dtype=torch.long)
         else:
@@ -255,19 +258,45 @@ class CrossHexagon(Motif):
         """
         super().__init__(num_colors, 6, 2 * 8,
                          dict(colors=colors, num_colors=num_colors, annotation=annotation))
-        self.colors = colors
+        self.colors = torch.tensor(colors)
         self.annotation = annotation
 
     def sample(self) -> SparseGraph:
-        color = _random_list_entry(self.colors)
+        color = self.colors[torch.randperm(self.colors.shape[0])[:6]]
         x = torch.zeros((6, self.num_colors))
-        x[:, color] = 1
+        x[torch.arange(6), color] = 1
         if self.annotation:
             annotations = torch.full((5,), self.annotation, dtype=torch.long)
         else:
             annotations = None
         edge_index = torch.tensor([[0, 1], [0, 2], [1, 4], [1, 3], [2, 4], [3, 2], [3, 5], [4, 5]], dtype=torch.long).T
         return SparseGraph(x, to_undirected(edge_index), annotations)
+
+
+class IntermediateNodeMotif(Motif):
+    def __init__(self, motif: Motif, num_intermediates: int, color: int):
+        super().__init__(motif.num_colors, motif.max_nodes + motif.max_edges * num_intermediates,
+                         motif.max_edges * (num_intermediates + 1),
+                         dict(motif=motif, num_intermediates=num_intermediates, color=color))
+        self.motif = motif
+        self.num_intermediates = num_intermediates
+        self.color = color
+
+    def sample(self) -> SparseGraph:
+        graph = self.motif.sample()
+        edge_index_orig = graph.edge_index[:, graph.edge_index[0] >= graph.edge_index[1]]
+        feature = torch.zeros(self.num_colors)
+        feature[self.color] = 1
+        for i in range(edge_index_orig.shape[1]):
+            last_node = edge_index_orig[1, i]
+            # Obviously, repeatedly insert is inefficient but this is only done once during startup with negligible
+            # time consumption anyway
+            for j in range(self.num_intermediates):
+                graph.insert_node_on_edge(edge_index_orig[0, i], last_node, feature)
+                last_node = graph.num_nodes() - 1  # the node that just got inserted
+        return graph
+
+
 
 class FullyConnectedMotif(Motif):
     def __init__(self, num_nodes: int, colors: List[int], num_colors: int, annotation: Optional[int] = None):
@@ -303,27 +332,35 @@ class FullyConnectedMotif(Motif):
 
 
 class CircleMotif(Motif):
-    def __init__(self, num_nodes: int, colors: List[int], num_colors: int, annotation: Optional[int] = None):
-        super().__init__(num_colors, num_nodes, 2 * num_nodes, dict(num_nodes=num_nodes, colors=colors,
-                                                                    num_colors=num_colors,
-                                                                    annotation=annotation))
+    def __init__(self, num_nodes: int, colors: List[int], num_colors: int, max_nodes: Optional[int] = None,
+                 num_nodes_step: int = 1, annotation: Optional[int] = None):
+        super().__init__(num_colors, num_nodes if max_nodes is None else max_nodes,
+                         2 * (num_nodes if max_nodes is None else max_nodes),
+                         dict(num_nodes=num_nodes, colors=colors, num_colors=num_colors, max_nodes=max_nodes,
+                              num_nodes_step=num_nodes_step, annotation=annotation))
         self.colors = colors
         self.num_nodes = num_nodes
         self.annotation = annotation
+        self.max_nodes = max_nodes
+        self.num_nodes_step = num_nodes_step
 
     def sample(self) -> SparseGraph:
+        num_nodes = self.num_nodes if self.max_nodes is None\
+            else self.num_nodes + self.num_nodes_step * np.random.randint(1 + ((self.max_nodes - self.num_nodes)
+                                                                               // self.num_nodes_step))
         color = _random_list_entry(self.colors)
-        x = torch.zeros((self.num_nodes, self.num_colors))
+        x = torch.zeros((num_nodes, self.num_colors))
         x[:, color] = 1
-        node_range = torch.arange(self.num_nodes)
-        edge_index = torch.stack((node_range, torch.remainder(node_range + 1, self.num_nodes)), dim=0)
+        node_range = torch.arange(num_nodes)
+        edge_index = torch.stack((node_range, torch.remainder(node_range + 1, num_nodes)), dim=0)
         edge_index = torch.cat((edge_index, torch.flip(edge_index, dims=(0, ))), dim=1)
         annotations = None if self.annotation is None else torch.ones(x.shape[0], dtype=torch.long) * self.annotation
         return SparseGraph(x, edge_index, annotations)
 
     @property
     def name(self):
-        return f"Circle ({self.num_nodes})"
+        return f"Circle ({self.num_nodes}" +\
+            ("" if self.max_nodes is None else f"-{self.max_nodes}, step={self.num_nodes_step}")
 
 
 class SetMotif(Motif):
@@ -344,6 +381,25 @@ class SetMotif(Motif):
     def name(self):
         return f"Set ({', '.join(e.name for e in self.elements)})"
 
+
+class ReplicationMotif(Motif):
+    def __init__(self, motif: Motif, num_replications: int):
+        super().__init__(motif.num_colors, num_replications * motif.max_nodes,
+                         num_replications * motif.max_edges,
+                         dict(motif=motif, num_replications=num_replications))
+        self.motif = motif
+        self.num_replications = num_replications
+
+    def sample(self) -> SparseGraph:
+        first = self.motif.sample()
+        res = first
+        for i in range(self.num_replications - 1):
+            res = res.merged_with(first)
+        return res
+
+    @property
+    def name(self):
+        return f"({self.num_replications} x {self.motif.name})"
 
 class BinaryTreeMotif(Motif):
     def __init__(self, max_depth: int, colors: List[int], num_colors: int, random: bool = True,

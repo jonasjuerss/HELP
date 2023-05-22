@@ -37,7 +37,7 @@ from data_generation.custom_dataset import UniqueMotifCategorizationDataset, Cus
 from data_generation.dataset_wrappers import DatasetWrapper, CustomDatasetWrapper, TUDatasetWrapper, EnzymesWrapper
 from data_generation.deserializer import from_dict
 from data_generation.motifs import BinaryTreeMotif, HouseMotif, FullyConnectedMotif, CircleMotif, SetMotif, \
-    CrossHexagon, SplitHexagon
+    CrossHexagon, SplitHexagon, ReplicationMotif, IntermediateNodeMotif
 from plot_gradient_flow import plot_grad_flow
 try:
     import resource
@@ -191,26 +191,9 @@ current_dataset = UniqueMultipleOccurrencesMotifCategorizationDataset(BinaryTree
                                                                         # [[0.4, 0.6], [0.4, 0.6]])#
 
 # Note that the colors (and number of colors) here are dummy and will be replaced by the dataset
-# current_dataset = UniqueHierarchicalMotifDataset([HouseMotif([0], [0], 1),
-#                                                   FullyConnectedMotif(4, [0], 1),
-#                                                   CircleMotif(5, [0], 1)],
-#                                                  [HouseMotif([0], [0], 1),
-#                                                   FullyConnectedMotif(5, [0], 1),
-#                                                   FullyConnectedMotif(3, [0], 1)],
-#                                                  [1/3, 1/3, 1/3],
-#                                                  [1/3, 1/3, 1/3],
-#                                                  recolor_lowlevel=True,
-#                                                  randomize_colors=True,
-#                                                  one_hot_color=True,
-#                                                  num_intermediate_nodes=10, #TODO change back
-#                                                  perturb=0.0)
-
-current_dataset = SimpleMotifCategorizationDataset([SetMotif([CircleMotif(3, [0], 1), CircleMotif(3, [0], 1)]),
-                                                    CircleMotif(6, [0], 1)])
-
 current_dataset = UniqueHierarchicalMotifDataset([HouseMotif([0], [0], 1),
-                                                  CrossHexagon([0], 1),
-                                                  SplitHexagon([0], 1),],
+                                                  FullyConnectedMotif(4, [0], 1),
+                                                  CircleMotif(5, [0], 1)],
                                                  [HouseMotif([0], [0], 1),
                                                   FullyConnectedMotif(5, [0], 1),
                                                   FullyConnectedMotif(3, [0], 1)],
@@ -219,8 +202,30 @@ current_dataset = UniqueHierarchicalMotifDataset([HouseMotif([0], [0], 1),
                                                  recolor_lowlevel=True,
                                                  randomize_colors=True,
                                                  one_hot_color=True,
-                                                 num_intermediate_nodes=4, #TODO change back
+                                                 num_intermediate_nodes=1,
                                                  perturb=0.0)
+
+# current_dataset = SimpleMotifCategorizationDataset([SetMotif([CircleMotif(3, [0], 1), CircleMotif(3, [0], 1)]),
+#                                                     CircleMotif(6, [0], 1)])
+
+# The two hexagons themselves with the random node colors they have in the hierarchical dataset are distinguishable by WL
+current_dataset = SimpleMotifCategorizationDataset([IntermediateNodeMotif(CrossHexagon([0, 1, 2, 3, 4, 5], 7), 1, 6),
+                                                    IntermediateNodeMotif(SplitHexagon([0, 1, 2, 3, 4, 5], 7), 1, 6)])
+# print(current_dataset.__dict__())
+
+# current_dataset = UniqueHierarchicalMotifDataset([HouseMotif([0], [0], 1),
+#                                                   CrossHexagon([0], 1),
+#                                                   SplitHexagon([0], 1),],
+#                                                  [HouseMotif([0], [0], 1),
+#                                                   FullyConnectedMotif(5, [0], 1),
+#                                                   FullyConnectedMotif(3, [0], 1)],
+#                                                  [1/3, 1/3, 1/3],
+#                                                  [1/3, 1/3, 1/3],
+#                                                  recolor_lowlevel=True,
+#                                                  randomize_colors=True,
+#                                                  one_hot_color=True,
+#                                                  num_intermediate_nodes=4, #TODO change back
+#                                                  perturb=0.0)
 
 current_dataset_wrapper = CustomDatasetWrapper(current_dataset)
 # current_dataset_wrapper = EnzymesWrapper()
