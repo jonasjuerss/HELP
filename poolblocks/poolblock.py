@@ -683,7 +683,7 @@ class MonteCarloBlock(PoolBlock):
                                              edge_index=edge_index, num_nodes=subset.shape[0]),
                                         to_undirected=not self.directed_graphs,
                                         node_attrs=["concept"])
-                        key = nx.algorithms.graph_hashing.weisfeiler_lehman_graph_hash(G)
+                        key = nx.algorithms.graph_hashing.weisfeiler_lehman_graph_hash(G, node_attr="concept")
 
                         if key in buckets:
                             for other_graph, occurrences in buckets[key].items():

@@ -19,18 +19,19 @@ from sklearn.manifold import TSNE
 from torch.utils.data import Subset
 from torch_geometric.data import Data
 from torch_geometric.loader import DenseDataLoader, DataLoader
-from torch_geometric.utils import k_hop_subgraph
+from torch_geometric.utils import k_hop_subgraph, to_dense_batch, to_dense_adj, to_networkx
 from torch_scatter import scatter
 from sklearn.tree import DecisionTreeClassifier
 from tqdm import tqdm
+import networkx.algorithms.isomorphism as iso
 
 from clustering_wrappers import ClusterAlgWrapper
 from color_utils import ColorUtils
 from custom_net import InferenceInfo, CustomNet
 from data_generation.custom_dataset import HierarchicalMotifGraphTemplate
 from data_generation.dataset_wrappers import CustomDatasetWrapper
-from graphutils import adj_to_edge_index
-from poolblocks.poolblock import DenseNoPoolBlock, SparseNoPoolBlock, DiffPoolBlock, MonteCarloBlock
+from graphutils import adj_to_edge_index, mask_to_batch, one_hot
+from poolblocks.poolblock import DenseNoPoolBlock, SparseNoPoolBlock, DiffPoolBlock, MonteCarloBlock, ASAPBlock
 from train import main
 import custom_logger
 
@@ -97,6 +98,14 @@ class Analyzer():
         return res
 
     def load_required_data(self, data_loader: DataLoader, load_part: float, mode: str, load_names: List[str]):
+        """
+        Loads data in dense data format, allowing for transparent handling during analysis
+        :param data_loader:
+        :param load_part:
+        :param mode:
+        :param load_names:
+        :return:
+        """
         set_size = math.floor(load_part * len(data_loader.dataset))
         data_loader = data_loader.__class__(data_loader.dataset[:set_size], data_loader.batch_size)
         num_classes = self.dataset_wrapper.num_classes
@@ -110,23 +119,26 @@ class Analyzer():
         if "out" in load_names:
             res["out"] = torch.empty(set_size, num_classes)
         if "x" in load_names:
-            if self.config.dense_data:
-                res["x"] = torch.full((set_size, max_nodes, num_node_features), float('nan'))
-            else:
-                res["x"] = torch.empty(self.dataset_wrapper.num_nodes_total, num_node_features)
+            res["x"] = torch.full((set_size, max_nodes, num_node_features), float('nan'))
         if "adj" in load_names:
             res["adj"] = torch.zeros(set_size, max_nodes, max_nodes, dtype=torch.int)
-        if "edge_index" in load_names:
-            res["edge_index"] = torch.zeros(2, self.dataset_wrapper.num_edges_total, dtype=torch.int)
+        # if "edge_index" in load_names:
+        #     res["edge_index"] = torch.zeros(2, self.dataset_wrapper.num_edges_total, dtype=torch.int)
         if "mask" in load_names:
             res["mask"] = torch.zeros(set_size, max_nodes, dtype=torch.bool)
         if "batch" in load_names:
-            res["batch"] = torch.zeros(set_size, dtype=torch.long)
+            res["batch"] = None if self.config.dense_data else torch.zeros(0, dtype=torch.long)
 
-        sample_i = 0
-        node_i = 0
-        edge_i = 0
         correct = 0
+        sample_i = 0
+
+        def _to_cpu(x):
+            if x is None:
+                return None
+            if isinstance(x, tuple):
+                return tuple(a.cpu() for a in x)
+            return x.cpu()
+
         with torch.no_grad():
             for batch_i, data in tqdm(enumerate(data_loader), total=math.ceil(set_size / data_loader.batch_size)):
                 target = data.y
@@ -139,22 +151,19 @@ class Analyzer():
                 target = target.to(custom_logger.device)
 
                 if self.config.dense_data:
-                    if "x" in load_names:
-                        res["x"][sample_i:sample_i_new] = data.x
-                    if "adj" in load_names:
-                        res["adj"][sample_i:sample_i_new] = data.adj
-                    if "mask" in load_names:
-                        res["mask"][sample_i:sample_i_new] = data.mask
-                else:
-                    if "x" in load_names:
-                        res["x"][node_i:node_i + data.x.shape[1]] = data.x
-                    if "edge_index" in load_names:
-                        res["edge_index"][:, edge_i:edge_i + data.edge_index.shape[1]] = data.edge_index
-                    if "batch" in load_names:
-                        res["batch"][node_i:node_i + data.x.shape[1]] = data.batch
-                    node_i += data.x.shape[0]
-                    edge_i += data.edge_index.shape[1]
+                    x, adj, mask = data.x, data.adj, data.mask
+                elif "x" in load_names or "adj" in load_names or "mask" in load_names:
+                    x, mask = to_dense_batch(data.x, data.batch, max_num_nodes=res["x"].shape[1])
+                    adj = to_dense_adj(data.edge_index, data.batch, max_num_nodes=res["x"].shape[1])
 
+                if "x" in load_names:
+                    res["x"][sample_i:sample_i_new] = x
+                if "adj" in load_names:
+                    res["adj"][sample_i:sample_i_new] = adj
+                if "mask" in load_names:
+                    res["mask"][sample_i:sample_i_new] = mask
+                if "batch" in load_names and not self.config.dense_data:
+                    res["batch"] = torch.cat((res["batch"], data.batch), dim=0)
                 data.to(custom_logger.device)
                 out, _, concepts, _, info = self.model(data, collect_info=True)
                 y_pred = torch.argmax(out, dim=1)
@@ -173,51 +182,273 @@ class Analyzer():
                         res["concepts"] = concepts
 
                 for key in [f.name for f in dataclasses.fields(InferenceInfo)]:
-                    # TODO support sparse
                     if "info_" + key in load_names:
+                        # preprocess
+                        if not self.config.dense_data:
+                            if key == "pooling_activations":
+                                pre_fun = lambda e, inf, i: to_dense_batch(e, batch=data.batch\
+                                    if i == 0 else inf.all_batch_or_mask[i - 1])[0]
+                            elif key == "adjs_or_edge_indices":
+                                pre_fun = lambda e, inf, i: to_dense_adj(e, batch=inf.all_batch_or_mask[i])
+                            elif key == "all_batch_or_mask":
+                                # inefficient but correct and not time critical in post-hoc analysis
+                                pre_fun = lambda e, inf, i: to_dense_batch(e, batch=inf.all_batch_or_mask[i])[1]
+                            elif key == "input_embeddings":
+                                pre_fun = lambda e, inf, i: to_dense_batch(e, batch=inf.all_batch_or_mask[i])[0]
+                            else:
+                                pre_fun = lambda e, *_: e
+                        else:
+                            pre_fun = lambda e, *_: e
+
                         if "info_" + key in res:
                             for i, e in enumerate(getattr(info, key)):
                                 if e is not None:
-                                    res["info_" + key][i] = self.cat_pad((res["info_" + key][i], e.cpu()), dim=0,
-                                                                         fill_value=-1 if key == "pooling_assignments" else 0)
+                                    res["info_" + key][i] = self.cat_pad((res["info_" + key][i], pre_fun(e, info, i).cpu()),
+                                                                         dim=0, fill_value=-1\
+                                            if key == "pooling_assignments" else 0)
 
                         else:
-                            res["info_" + key] = [None if e is None else e.cpu() for e in getattr(info, key)]
+
+                            res["info_" + key] = [_to_cpu(pre_fun(e, info, i)) for i, e in enumerate(getattr(info, key))]
 
                 sample_i = sample_i_new
 
         print(f"Loaded {set_size} {mode} samples. Accuracy {100 * correct / set_size:.2f}%")
         return res # data, out, concepts, info, y_pred
 
+    @staticmethod
+    def plot_wandb_tables(node_table: wandb.Table, edge_table: wandb.Table, pool_step: int, graph: int,
+                          node_size: int = 100, directed=False, save_path: Optional[str] = None):
+        border_color_i = node_table.columns.index("border_color")
+        r_i = node_table.columns.index("r")
+        g_i = node_table.columns.index("g")
+        b_i = node_table.columns.index("b")
+        node_i = node_table.columns.index("node_index")
+        graph_i_n = node_table.columns.index("graph")
+        pool_step_i_n = node_table.columns.index("pool_step")
+
+        source_i = edge_table.columns.index("source")
+        target_i = edge_table.columns.index("target")
+        graph_i_e = edge_table.columns.index("graph")
+        pool_step_i_e = edge_table.columns.index("pool_step")
+        edge_index = torch.tensor([[e[source_i], e[target_i]] for e in edge_table.data if
+                                   e[graph_i_e] == graph and e[pool_step_i_e] == pool_step]).T
+        nodes = [n for n in node_table.data if n[graph_i_n] == graph and n[pool_step_i_n] == pool_step]
+        num_nodes = len(nodes)
+        assert np.all(np.array([n[node_i] for n in nodes]) == np.arange(num_nodes))
+
+        border_colors = [n[border_color_i] for n in nodes]
+        fill_colors = [ColorUtils.rgb2hex(int(n[r_i]), int(n[g_i]), int(n[b_i])) for n in nodes]
+        data = Data(edge_index=edge_index, num_nodes=num_nodes)
+        g = torch_geometric.utils.to_networkx(data, to_undirected=not directed)
+        nx.draw(g, node_color=fill_colors, edgecolors=border_colors, linewidths=2, node_size=node_size)
+        # pos = nx.spring_layout(g)
+        # drawn_nodes = nx.draw_networkx_nodes(g, pos, node_size=node_size)
+        # drawn_nodes.set_edgecolor(border_colors)
+        # nx.draw_networkx_edges(g, pos)
+        if save_path is not None:
+            plt.savefig(f"{save_path}.pdf", bbox_inches='tight')
+        plt.show()
+
     def log_graphs(self, samples_per_concept: int = 3):
-        train_data = self.load_required_data(self.train_loader, samples_per_concept / len(self.train_loader.dataset),
-                                             "train",
+        test_data = self.load_required_data(self.test_loader, samples_per_concept / len(self.test_loader.dataset),
+                                             "test",
                                              ["x", "mask", "adj", "info_pooling_assignments",
                                               "info_pooling_activations", "info_all_batch_or_mask",
                                               "info_adjs_or_edge_indices", "info_node_assignments"])
-        self.general_log_graphs(self.model, samples_per_concept=samples_per_concept, **train_data)
+        return self.general_log_graphs(self.model, samples_per_concept=samples_per_concept, **test_data)
 
     @staticmethod
-    def deterministic_concept_assignments(model: CustomNet, info_pooling_assignments: torch.Tensor) -> List[torch.Tensor]:
+    def check_one_hot(x: torch.Tensor):
+        if torch.any(torch.max(x, dim=-1)[0] != 1) or torch.any(torch.sum(x, dim=-1) != 1) or torch.any(x < 0):
+            raise ValueError("Node features are expected to be one-hot!")
+
+    def find_subgraph(self, search_edge_index: torch.Tensor, search_concepts: torch.Tensor, pool_step: int,
+                      load_part: float = 1, save_path: Optional[str] = None):
+        """
+
+        :param search_edge_index:
+        :param search_concepts: [num_nodes] integer tensor with the argmax input features (if pool_level == 0) or the concepts
+            of the input nodes (otherwise)
+        :param pool_step:
+        :param load_part:
+        :param save_path:
+        :return:
+        """
+        required_fields = ["info_pooling_assignments"]
+        if pool_step != 0:
+            required_fields += ["info_all_batch_or_mask", "info_adjs_or_edge_indices", "info_node_assignments"]
+        else:
+            required_fields += ["x", "mask", "adj"]
+        test_data = self.load_required_data(self.test_loader, load_part, "test", required_fields)
+
+        if pool_step == 0:
+            self.check_one_hot(test_data["x"][test_data["mask"]])
+            initial_concepts = torch.argmax(test_data["x"], dim=-1).cpu()
+            adj = test_data["adj"].cpu()
+            mask = test_data["mask"].cpu()
+        else:
+            initial_concepts = test_data["info_node_assignments"][pool_step - 1].cpu()
+            adj = test_data["info_adjs_or_edge_indices"][pool_step - 1].cpu()
+            mask = test_data["info_all_batch_or_mask"][pool_step - 1].cpu()
+        assignment = test_data["info_pooling_assignments"][pool_step].cpu()
+
+        subgraph = to_networkx(
+            Data(concept=search_concepts, edge_index=search_edge_index, num_nodes=search_concepts.shape[0]),
+            to_undirected=not self.dataset_wrapper.is_directed, node_attrs=["concept"])
+
+        checked = torch.logical_not(mask)  # masked nodes count as checked
+        # Would easily be parallelizable over samples
+        concept_counts = torch.zeros(torch.max(assignment) + 1, dtype=torch.int)
+        occurence_counts = torch.zeros(torch.max(assignment) + 1, dtype=torch.int)
+        for sample in tqdm(range(checked.shape[0])):
+            edge_index, _, _ = adj_to_edge_index(adj[sample], mask[sample])
+            edge_index = edge_index[:, assignment[sample, edge_index[0, :]] == assignment[sample, edge_index[1, :]]]
+            for node in range(checked.shape[1]):
+                if checked[sample, node]:
+                    continue
+
+                nodes_in_cur_graph = torch.sum(mask[sample]).item()
+                subset, edge_index_loc, mapping, _ = k_hop_subgraph(node, nodes_in_cur_graph,
+                                                                    edge_index,
+                                                                    relabel_nodes=True,
+                                                                    num_nodes=nodes_in_cur_graph)
+                checked[sample, mapping] = True
+                concept_counts[assignment[sample, node]] += 1
+                if subset.shape[0] != search_concepts.shape[0]:
+                    continue
+
+                cur_graph = to_networkx(Data(concept=initial_concepts[sample][subset], edge_index=edge_index_loc,
+                                             num_nodes=subset.shape[0]),
+                                        to_undirected=not self.dataset_wrapper.is_directed,
+                                        node_attrs=["concept"])
+
+                if nx.is_isomorphic(cur_graph, subgraph, node_match=iso.categorical_node_match("concept", None)):
+                    occurence_counts[assignment[sample, node]] += 1
+
+        fig, ax = plt.subplots()
+        ax.bar(np.arange(concept_counts.shape[0]), occurence_counts, label="occurences")
+        ax.bar(np.arange(concept_counts.shape[0]), concept_counts - occurence_counts, label="total",
+               bottom=occurence_counts)
+        if save_path:
+            fig.savefig(f"{save_path}.pdf", bbox_inches='tight')
+
+    def count_subgraphs(self, pool_step: int, load_part: float = 1, save_path: Optional[str] = None):
+        required_fields = ["info_pooling_assignments"]
+        if pool_step != 0:
+            required_fields += ["info_all_batch_or_mask", "info_adjs_or_edge_indices", "info_node_assignments"]
+        else:
+            required_fields += ["x", "mask", "adj"]  # TODO use test if not significantly worse
+        test_data = self.load_required_data(self.train_loader, load_part, "train", required_fields)
+
+        if pool_step == 0:
+            self.check_one_hot(test_data["x"][test_data["mask"]])
+            initial_concepts = torch.argmax(test_data["x"], dim=-1).cpu()
+            adj = test_data["adj"].cpu()
+            mask = test_data["mask"].cpu()
+        else:
+            initial_concepts = test_data["info_node_assignments"][pool_step - 1].cpu()
+            adj = test_data["info_adjs_or_edge_indices"][pool_step - 1].cpu()
+            mask = test_data["info_all_batch_or_mask"][pool_step - 1].cpu()
+        assignment = test_data["info_pooling_assignments"][pool_step].cpu()
+
+        checked = torch.logical_not(mask)  # masked nodes count as checked
+        # Would easily be parallelizable over samples
+        concept_counts = torch.zeros(torch.max(assignment) + 1, dtype=torch.int)
+        buckets = {}
+        for sample in tqdm(range(checked.shape[0])):
+            nodes_in_cur_graph = torch.sum(mask[sample]).item()
+            edge_index, _, _ = adj_to_edge_index(adj[sample], mask[sample])
+            # plot_nx_graph(to_networkx(Data(#concept=initial_concepts[sample][mask[sample]],
+            #     concept=assignment[sample][mask[sample]], edge_index=edge_index, num_nodes=nodes_in_cur_graph), to_undirected=not self.dataset_wrapper.is_directed, node_attrs=["concept"]))
+            # plt.show()
+            edge_index = edge_index[:, assignment[sample, edge_index[0, :]] == assignment[sample, edge_index[1, :]]]
+
+            # plot_nx_graph(to_networkx(Data(concept=assignment[sample][mask[sample]], edge_index=edge_index, num_nodes=nodes_in_cur_graph), to_undirected=not self.dataset_wrapper.is_directed, node_attrs=["concept"]))
+            # plt.show()
+            # break
+
+            for node in range(checked.shape[1]):
+                if checked[sample, node]:
+                    continue
+                subset, edge_index_loc, mapping, _ = k_hop_subgraph(node, nodes_in_cur_graph,
+                                                                    edge_index,
+                                                                    relabel_nodes=True,
+                                                                    num_nodes=nodes_in_cur_graph)
+                checked[sample, mapping] = True
+                cur_concept = assignment[sample, node]
+                concept_counts[cur_concept] += 1
+
+                cur_graph = to_networkx(Data(concept=initial_concepts[sample][subset], edge_index=edge_index_loc,
+                                             num_nodes=subset.shape[0]),
+                                        to_undirected=not self.dataset_wrapper.is_directed,
+                                        node_attrs=["concept"])
+                key = nx.algorithms.graph_hashing.weisfeiler_lehman_graph_hash(cur_graph, node_attr="concept")
+
+                if key in buckets:
+                    for other_graph, occurrences in buckets[key].items():
+                        if nx.is_isomorphic(other_graph, cur_graph,
+                                            node_match=iso.categorical_node_match("concept", None)):
+                            buckets[key][other_graph][cur_concept] += 1
+                            break
+                    else:
+                        buckets[key][cur_graph] = one_hot(cur_concept, concept_counts.shape[0], dtype=torch.int)
+                else:
+                    buckets[key] = {cur_graph: one_hot(cur_concept, concept_counts.shape[0], dtype=torch.int)}
+
+        subgraphs = []
+        for key in buckets:
+            for g, counts in buckets[key].items():
+                subgraphs.append((g, counts))
+        subgraphs.sort(key=lambda x: torch.sum(x[1]), reverse=True)
+
+        fig, ax = plt.subplots()
+        bottom = torch.zeros_like(concept_counts)
+        for i, (g, counts) in enumerate(subgraphs):
+            ax.bar(np.arange(concept_counts.shape[0]), counts, bottom=bottom, label=f"{i}")
+            bottom += counts
+        if save_path:
+            fig.savefig(f"{save_path}.pdf", bbox_inches='tight')
+        return subgraphs
+
+    @staticmethod
+    def deterministic_concept_assignments(model: CustomNet, info_pooling_assignments: List[torch.Tensor],
+                                          masks: List[torch.Tensor]) -> List[torch.Tensor]:
         res = []
-        for i, ass in enumerate(info_pooling_assignments):
-            if model.graph_network.pool_blocks[i].__class__ == DiffPoolBlock:
+        for i, (block, ass) in enumerate(zip(model.graph_network.pool_blocks, info_pooling_assignments)):
+            if block.__class__ == DiffPoolBlock:
                 res.append(torch.argmax(ass, dim=-1))
-            elif model.graph_network.pool_blocks[i].__class__ in [MonteCarloBlock]:
+            elif block.__class__ == ASAPBlock:
+                # TODO Check again how stuff works for ASAP. I'm sure we can plot the assignments but the meaning of a
+                #  particular assignment might change from sample to sample because they are only the top k most
+                #  important ones. There might not be a unique number like cluster id or new node id that mean the same
+                #  thing across graphs. This is another important drawback that I should mention in my thesis
+                #  (put whatever I find out in the thesis directly).
+                sparse_assignments = torch.zeros(ass[1].shape[0], dtype=torch.long, device=ass[0].device)
+                sparse_assignments[ass[0]] = 1
+                res.append(to_dense_batch(sparse_assignments, mask_to_batch(masks[i]),
+                                          max_num_nodes=masks[i].shape[-1])[0])
+            elif block.__class__ in [MonteCarloBlock]:
                 res.append(ass)
-            elif model.graph_network.pool_blocks[i].__class__ not in [SparseNoPoolBlock, DenseNoPoolBlock]:
-                raise NotImplementedError(f"PoolBlock type not supported {model.graph_network.pool_blocks[i].__class__}")
+            elif block.__class__ not in [SparseNoPoolBlock, DenseNoPoolBlock]:
+                raise NotImplementedError(f"PoolBlock type not supported {block.__class__}")
         return res
 
     @staticmethod
-    def deterministic_node_assignments(model: CustomNet, det_pooling_assignments: torch.Tensor,
-                                       info_node_assignments: torch.Tensor, check=True) -> List[
+    def deterministic_node_assignments(model: CustomNet, det_pooling_assignments: List[torch.Tensor],
+                                       info_node_assignments: List[torch.Tensor], check=True) -> List[
         torch.Tensor]:
         res = []
         for i, (block, ass) in enumerate(zip(model.graph_network.pool_blocks, info_node_assignments)):
             if block.__class__ == DiffPoolBlock:
                 res.append(torch.arange(block.num_output_nodes, device=ass.device).repeat(ass.shape[0], 1))
-            elif block.__class__ in [MonteCarloBlock]:
+            elif block.__class__ == ASAPBlock:
+                if i < len(det_pooling_assignments) - 1:
+                    res.append(torch.zeros(det_pooling_assignments[i].shape[0], det_pooling_assignments[i + 1].shape[1],
+                                           device=det_pooling_assignments[i].device, dtype=torch.long))
+                else:
+                    res.append(None)
+            elif block.__class__ == MonteCarloBlock:
                 scat = scatter(det_pooling_assignments[i], ass, reduce="min", dim=-1)[:, 1:]
                 res.append(scat)
                 if check:
@@ -230,10 +461,10 @@ class Analyzer():
 
     @staticmethod
     def general_log_graphs(model: CustomNet, x: torch.Tensor, adj: torch.Tensor,
-                                      mask: torch.Tensor, info_pooling_activations: torch.Tensor,
-                                      info_all_batch_or_mask: torch.Tensor, info_node_assignments: torch.Tensor,
-                                      info_adjs_or_edge_indices: torch.Tensor, info_pooling_assignments: torch.Tensor,
-                                      samples_per_concept: int, epoch: Optional[int] = None):
+                           mask: torch.Tensor, info_pooling_activations: torch.Tensor,
+                           info_all_batch_or_mask: torch.Tensor, info_node_assignments: torch.Tensor,
+                           info_adjs_or_edge_indices: torch.Tensor, info_pooling_assignments: torch.Tensor,
+                           samples_per_concept: int, epoch: Optional[int] = None):
         # IMPORTANT: Here it is crucial to have batches of the size used during training in the forward pass
         # if using only a single example, some concepts might not be present but we still enforce the same number of
         # clusters
@@ -245,7 +476,7 @@ class Analyzer():
             adjs = [adj] + info_adjs_or_edge_indices
             masks = [mask] + [torch.ones(*a.shape[:2], dtype=torch.bool, device=a.device) if m is None else m
                               for m, a in zip(info_all_batch_or_mask, info_adjs_or_edge_indices)]
-            pool_assignments = Analyzer.deterministic_concept_assignments(model, info_pooling_assignments)
+            pool_assignments = Analyzer.deterministic_concept_assignments(model, info_pooling_assignments, masks)
             node_concepts = [torch.argmax(x, dim=-1)]\
                             + Analyzer.deterministic_node_assignments(model, pool_assignments, info_node_assignments)
 
@@ -280,6 +511,7 @@ class Analyzer():
             node_table=node_table,
             edge_table=edge_table
         ), *({} if epoch is None else {"step": epoch}))
+        return node_table, edge_table
 
 
     @staticmethod
@@ -536,6 +768,8 @@ class Analyzer():
         if save_path is not None:
             fig.savefig(save_path, bbox_inches='tight')
         return fig
+
+
     def plot_dropout_effect(self, save_path=None):
         fig, ax = plt.subplots()
         concepts = torch.tensor(np.argmax(self.x_out_all, axis=1))

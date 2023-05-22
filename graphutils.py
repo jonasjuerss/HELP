@@ -35,7 +35,7 @@ def adj_to_edge_index(adj: torch.Tensor, mask: Optional[torch.Tensor] = None)\
     if adj.ndim == 2:
         if mask is not None:
             # There should be an easier wys to index values at the mask
-            adj = adj[torch.logical_and(mask[0][None, :], mask[0][:, None])]
+            adj = adj[torch.logical_and(mask[None, :], mask[:, None])]
             num_nodes = math.isqrt(adj.shape[0])
             adj = adj.view(num_nodes, num_nodes)
         return adj.nonzero().t().contiguous(), None, adj.shape[-1]
@@ -163,3 +163,16 @@ def data_to_dense(data: Data, max_nodes: int):
         data.pos = torch.cat([data.pos, data.pos.new_zeros(size)], dim=0)
 
     return data
+
+
+def one_hot(indices: int | torch.Tensor, num_classes: Optional[int] = None):
+    indices = torch.as_tensor(indices)
+    assert indices.ndim <= 1 # Otherwise would need to deal with arange over arbitrary number of dimensions
+    if num_classes is None:
+        num_classes = torch.max(indices) + 1
+    res = torch.zeros(indices.shape + (num_classes, ))
+    if indices.ndim == 0:
+        res[indices] = 1
+    else:
+        res[torch.arange(indices.shape[0]), indices] = 1
+    return res
