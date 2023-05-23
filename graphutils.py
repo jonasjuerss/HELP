@@ -165,12 +165,12 @@ def data_to_dense(data: Data, max_nodes: int):
     return data
 
 
-def one_hot(indices: int | torch.Tensor, num_classes: Optional[int] = None):
+def one_hot(indices: int | torch.Tensor, num_classes: Optional[int] = None, **kwargs):
     indices = torch.as_tensor(indices)
     assert indices.ndim <= 1 # Otherwise would need to deal with arange over arbitrary number of dimensions
     if num_classes is None:
         num_classes = torch.max(indices) + 1
-    res = torch.zeros(indices.shape + (num_classes, ))
+    res = torch.zeros(indices.shape + (num_classes, ), **kwargs)
     if indices.ndim == 0:
         res[indices] = 1
     else:

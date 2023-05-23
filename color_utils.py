@@ -1,5 +1,6 @@
 import math
 import warnings
+from typing import Optional, List
 
 import numpy as np
 import torch
@@ -29,7 +30,11 @@ class ColorUtils:
                 [255, 193, 7],
                 [255, 87, 34],
                 [158, 158, 158]], dtype=torch.float)
+
     _rgb_colors_orig = rgb_colors
+
+    rgb_feature_colors = rgb_colors
+    feature_labels: Optional[List[str]] = None
 
     @staticmethod
     def rgb2hex(r: int, g: int, b: int):
@@ -45,7 +50,8 @@ class ColorUtils:
         if cls.hex_colors.shape[0] < required_colors:
             new_num_colors = math.ceil(required_colors / cls._hex_colors_orig.shape[0])
             warnings.warn(
-                f"Only {cls.hex_colors.shape[0]} colors but {required_colors} needed! Repeating colors to {new_num_colors}.")
+                f"Only {cls.hex_colors.shape[0]} colors but {required_colors} needed! Repeating original "
+                f"{new_num_colors} times.")
             cls.hex_colors = np.tile(cls._hex_colors_orig, new_num_colors)
 
     @classmethod
@@ -54,5 +60,15 @@ class ColorUtils:
             new_num_colors = math.ceil(required_colors / cls._rgb_colors_orig.shape[0])
             warnings.warn(
                 f"Only {cls.rgb_colors.shape[0]} colors given to distinguish {required_colors} "
-                f"cluster! Repeating to {new_num_colors} colors.")
+                f"cluster! Repeating original {new_num_colors} times.")
             cls.rgb_colors = cls._rgb_colors_orig.repeat(new_num_colors, 1)
+
+    @classmethod
+    def ensure_min_rgb_feature_colors(cls, required_colors: int | torch.Tensor):
+        if cls.rgb_colors.shape[0] < required_colors:
+            new_num_colors = math.ceil((required_colors - cls.rgb_feature_colors.shape[0]) /
+                                       cls._rgb_colors_orig.shape[0])
+            warnings.warn(
+                f"Only {cls.rgb_colors.shape[0]} colors given to distinguish {required_colors} "
+                f"features! Adding {new_num_colors * cls._rgb_colors_orig.shape[0]} from rgb colors.")
+            cls.rgb_colors = torch.cat((cls.rgb_feature_colors, cls._rgb_colors_orig.repeat(new_num_colors, 1)), dim=0)

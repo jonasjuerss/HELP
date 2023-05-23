@@ -9,6 +9,7 @@ from torch_geometric.datasets import TUDataset
 from torch_geometric.transforms import ToDense, Compose, Constant
 
 import data_generation.serializer as seri
+from color_utils import ColorUtils
 from data_generation.custom_dataset import CustomDataset
 from data_generation.transforms import RemoveEdgeFeatures
 from graphutils import data_to_dense
@@ -149,10 +150,15 @@ class BBBPWrapper(PtFileWrapper):
 class BBBPAtomWrapper(PtFileWrapper):
     def __init__(self):
         super().__init__("data/bbbp_atom.pt", dict())
+        # https://github.com/DeepGraphLearning/torchdrug/issues/197
+        # atom_types = [1, 5, 6, 7, 8, 9, 11, 15, 16, 17, 20, 35, 53]
+        ColorUtils.feature_labels = ['H', 'B', 'C', 'N', 'O', 'F', 'Na', 'P', 'S', 'Cl', 'Ca', 'Br', 'I']
 
 class TUDatasetWrapper(PyGWrapper):
     def __init__(self, dataset_name: str, is_directed: bool, remove_edge_fts: bool = False, args=None,
                  class_names: Optional[List[str]] = None):
+        # Note that the downloaded files (in C:\tmp in my case on windows because I set root to /tmp/) have a README
+        # explaining node and class labels
         if args is None:
             args = dict(dataset_name=dataset_name)
         super().__init__(TUDataset, remove_edge_fts, is_directed, dict(root='/tmp', name=dataset_name), args, class_names)
@@ -162,7 +168,8 @@ class MutagWrapper(TUDatasetWrapper):
     def __init__(self, remove_edge_fts: bool = True):
         super().__init__("MUTAG", False, remove_edge_fts, dict(remove_edge_fts=remove_edge_fts),
                          ["not mutagenic", "mutagenic"])
-        # self.label_map = np.array(['C', 'O', 'Cl', 'H', 'N', 'F', 'Br', 'S', 'P', 'I', 'Na', 'K', 'Li', 'Ca'])
+        #ColorUtils.rgb_feature_colors = None
+        ColorUtils.feature_labels = ['C', 'O', 'Cl', 'H', 'N', 'F', 'Br', 'S', 'P', 'I', 'Na', 'K', 'Li', 'Ca']
         #         self.color_map = np.array(
         #             ['#2c3e50', '#e74c3c', '#27ae60', '#3498db', '#CDDC39', '#f39c12', '#795548', '#8e44ad', '#3F51B5',
         #              '#7f8c8d', '#e84393', '#607D8B', '#8e44ad', '#009688'])
@@ -170,7 +177,10 @@ class MutagWrapper(TUDatasetWrapper):
 
 class MutagenicityWrapper(TUDatasetWrapper):
     def __init__(self, remove_edge_fts: bool = True):
-        super().__init__("Mutagenicity", False, remove_edge_fts, dict(remove_edge_fts=remove_edge_fts))
+        super().__init__("Mutagenicity", False, remove_edge_fts, dict(remove_edge_fts=remove_edge_fts),
+                         ["not mutagenic", "mutagenic"])
+        # TODO set colors
+        ColorUtils.feature_labels = ['C', 'O', 'Cl', 'H', 'N', 'F', 'Br', 'S', 'P', 'I', 'Na', 'K', 'Li', 'Ca']
 
 
 class RedditBinaryWrapper(TUDatasetWrapper):

@@ -10,7 +10,7 @@ import graphutils
 Modified from: https://github.com/DeMoriarty/fast_pytorch_kmeans
 """
 
-class KMeans:
+class KMeans(torch.nn.Module):
     '''
     Kmeans clustering algorithm implemented with PyTorch
 
@@ -40,6 +40,7 @@ class KMeans:
     '''
 
     def __init__(self, n_clusters, max_iter=100, tol=0.0001, verbose=0, mode="euclidean", minibatch=None, threshold=0):
+        super().__init__()
         self.n_clusters = n_clusters
         self.max_iter = max_iter
         self.tol = tol
@@ -57,8 +58,7 @@ class KMeans:
             self._pynvml_exist = True
         except ModuleNotFoundError:
             self._pynvml_exist = False
-
-        self.centroids = None
+        self.register_buffer("centroids", None)
 
     @staticmethod
     def cos_sim(a, b):

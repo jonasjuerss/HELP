@@ -12,9 +12,10 @@ import graphutils
 from kmeans import KMeans
 
 
-class ClusterAlgWrapper(abc.ABC):
+class ClusterAlgWrapper(abc.ABC, torch.nn.Module):
 
     def __init__(self, **kwargs):
+        super().__init__()
         self.kwargs = kwargs
 
     def fit_predict(self, X: torch.Tensor, train: bool = False) -> torch.Tensor:
@@ -105,7 +106,7 @@ class MeanShiftWrapper(ClusterAlgWrapper):
     def __init__(self, range: float):
         super().__init__(range=range)
         self.range = range
-        self._centroids = None
+        self.register_buffer("_centroids", None)
 
     def fit(self, X: torch.Tensor, train: bool = False) -> None:
         centroids = X
@@ -131,7 +132,8 @@ class MeanShiftWrapper(ClusterAlgWrapper):
     def centroids(self) -> torch.Tensor:
         return self._centroids
 
-class SequentialKMeansMeanShiftWrapper(torch.nn.Module, ClusterAlgWrapper):
+
+class SequentialKMeansMeanShiftWrapper(ClusterAlgWrapper):
     """
     Idea: Inspired by https://qr.ae/pypKoP and the linked paper. Maintain overestimated number of sketches and counts
     for each of them. Update according to (https://stackoverflow.com/a/3706827) and then also calculate the actually
@@ -226,7 +228,7 @@ class SequentialKMeansMeanShiftWrapper(torch.nn.Module, ClusterAlgWrapper):
         return self._centroids if self.rescale_clusters_decay == -1 else self._centroids * self.running_std
 
 
-class LearnableCentroidsWrapper(torch.nn.Module, ClusterAlgWrapper):
+class LearnableCentroidsWrapper(ClusterAlgWrapper):
     """
     Currently unusable as no gradients are backpropagated to the centroids. Couldn't work brcause of the detach()es
     before clustering anyway?

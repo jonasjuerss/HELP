@@ -625,9 +625,9 @@ class MonteCarloBlock(PoolBlock):
                     # [num_nodes_in_neighbourhood, num_concepts] where (i, j) gives difference between node i and concept j
                     feature_colors = torch.cdist(input_embeddings[pool_step][graph_i, masks[pool_step][graph_i]],
                                                  centroids[pool_step])
-                    ColorUtils.ensure_min_rgb_colors(feature_colors.shape[1])
+                    ColorUtils.ensure_min_rgb_feature_colors(feature_colors.shape[1])
                     feature_colors = torch.sum(torch.nn.functional.softmin(feature_colors / TEMPERATURE, dim=1)[:, :, None].cpu() *
-                                               ColorUtils.rgb_colors[None, :feature_colors.shape[1], :], dim=1)
+                                               ColorUtils.rgb_feature_colors[None, :feature_colors.shape[1], :], dim=1)
                     feature_colors = torch.round(feature_colors).to(int)
 
                     for i, i_old in enumerate(masks[pool_step][graph_i].nonzero().squeeze(1)):

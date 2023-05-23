@@ -25,7 +25,7 @@ from sklearn.tree import DecisionTreeClassifier
 from tqdm import tqdm
 import networkx.algorithms.isomorphism as iso
 
-from clustering_wrappers import ClusterAlgWrapper
+from clustering_wrappers import ClusterAlgWrapper, KMeansWrapper, SequentialKMeansMeanShiftWrapper, MeanShiftWrapper
 from color_utils import ColorUtils
 from custom_net import InferenceInfo, CustomNet
 from data_generation.custom_dataset import HierarchicalMotifGraphTemplate
@@ -129,6 +129,22 @@ class Analyzer():
         if "batch" in load_names:
             res["batch"] = None if self.config.dense_data else torch.zeros(0, dtype=torch.long)
 
+        remap_assignments = "info_pooling_assignments" in load_names and \
+                            any(isinstance(b, MonteCarloBlock) and \
+                                not isinstance(b.cluster_alg, SequentialKMeansMeanShiftWrapper) and\
+                                not b.global_clusters
+                                for b in self.model.graph_network.pool_blocks)
+        if remap_assignments:
+            for pb in self.model.graph_network.pool_blocks:
+                if isinstance(pb, MonteCarloBlock) and not (isinstance(pb.cluster_alg, KMeansWrapper) or
+                                                            isinstance(pb.cluster_alg, MeanShiftWrapper)):
+                    raise ValueError("Can only remap KMeans and MeanShift clustering at the moment."
+                                     "In particular, the algorithm must be stateless.")
+            res["centroids"] = [[] for _ in self.model.graph_network.pool_blocks]
+            print("Remapping assignments between batches!")
+        else:
+            print("NOT remapping assignments between batches!")
+
         correct = 0
         sample_i = 0
 
@@ -181,6 +197,11 @@ class Analyzer():
                     else:
                         res["concepts"] = concepts
 
+                if remap_assignments:
+                    for i, pb in enumerate(self.model.graph_network.pool_blocks):
+                        if hasattr(pb, "cluster_alg"):
+                            res["centroids"][i].append(pb.cluster_alg.centroids)
+
                 for key in [f.name for f in dataclasses.fields(InferenceInfo)]:
                     if "info_" + key in load_names:
                         # preprocess
@@ -208,17 +229,35 @@ class Analyzer():
                                             if key == "pooling_assignments" else 0)
 
                         else:
-
                             res["info_" + key] = [_to_cpu(pre_fun(e, info, i)) for i, e in enumerate(getattr(info, key))]
 
                 sample_i = sample_i_new
+            if remap_assignments:
+                for pool_step, all_centroids in enumerate(res["centroids"]):
+                    if not all_centroids:
+                        continue
+                    cluster_alg = self.model.graph_network.pool_blocks[pool_step].cluster_alg
+                    cluster_kwargs = cluster_alg.kwargs
+                    cluster_kwargs["kmeans_threshold"] = 0
+                    cluster_alg = cluster_alg.__class__(**cluster_kwargs)
+                    cluster_alg.kmeans_threshold = 0
+                    cluster_alg = cluster_alg.fit_copy(torch.cat(all_centroids, dim=0))
+                    # Efficiency is not too important here:
+                    for batch_i, cents in enumerate(all_centroids):
+                        new_ass = cluster_alg.predict(cents)
+                        res["info_pooling_assignments"][pool_step][batch_i] =\
+                            new_ass[res["info_pooling_assignments"][pool_step][batch_i]]
+                        if torch.any(torch.unique(new_ass, return_counts=True)[1] > 1):
+                            warnings.warn("Different centroids were mapped to the same global cluster!")
+        if "centroids" not in load_names:
+            del res["centroids"]
 
         print(f"Loaded {set_size} {mode} samples. Accuracy {100 * correct / set_size:.2f}%")
         return res # data, out, concepts, info, y_pred
 
     @staticmethod
     def plot_wandb_tables(node_table: wandb.Table, edge_table: wandb.Table, pool_step: int, graph: int,
-                          node_size: int = 100, directed=False, save_path: Optional[str] = None):
+                          node_size: int = 300, directed=False, save_path: Optional[str] = None):
         border_color_i = node_table.columns.index("border_color")
         r_i = node_table.columns.index("r")
         g_i = node_table.columns.index("g")
@@ -226,6 +265,7 @@ class Analyzer():
         node_i = node_table.columns.index("node_index")
         graph_i_n = node_table.columns.index("graph")
         pool_step_i_n = node_table.columns.index("pool_step")
+        label_i = node_table.columns.index("permanent_label")
 
         source_i = edge_table.columns.index("source")
         target_i = edge_table.columns.index("target")
@@ -241,7 +281,8 @@ class Analyzer():
         fill_colors = [ColorUtils.rgb2hex(int(n[r_i]), int(n[g_i]), int(n[b_i])) for n in nodes]
         data = Data(edge_index=edge_index, num_nodes=num_nodes)
         g = torch_geometric.utils.to_networkx(data, to_undirected=not directed)
-        nx.draw(g, node_color=fill_colors, edgecolors=border_colors, linewidths=2, node_size=node_size)
+        nx.draw(g, node_color=fill_colors, edgecolors=border_colors, linewidths=2, node_size=node_size,
+                labels={i: l for i, l in enumerate(n[label_i] for n in nodes)})
         # pos = nx.spring_layout(g)
         # drawn_nodes = nx.draw_networkx_nodes(g, pos, node_size=node_size)
         # drawn_nodes.set_edgecolor(border_colors)
@@ -461,14 +502,15 @@ class Analyzer():
 
     @staticmethod
     def general_log_graphs(model: CustomNet, x: torch.Tensor, adj: torch.Tensor,
-                           mask: torch.Tensor, info_pooling_activations: torch.Tensor,
-                           info_all_batch_or_mask: torch.Tensor, info_node_assignments: torch.Tensor,
-                           info_adjs_or_edge_indices: torch.Tensor, info_pooling_assignments: torch.Tensor,
+                           mask: torch.Tensor, info_pooling_activations: List[torch.Tensor],
+                           info_all_batch_or_mask: List[torch.Tensor], info_node_assignments: List[torch.Tensor],
+                           info_adjs_or_edge_indices: List[torch.Tensor], info_pooling_assignments: List[torch.Tensor],
                            samples_per_concept: int, epoch: Optional[int] = None):
         # IMPORTANT: Here it is crucial to have batches of the size used during training in the forward pass
         # if using only a single example, some concepts might not be present but we still enforce the same number of
         # clusters
-        node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "border_color", "label", "activations"])
+        node_table = wandb.Table(["graph", "pool_step", "node_index", "r", "g", "b", "border_color", "label",
+                                  "activations", "permanent_label"])
         edge_table = wandb.Table(["graph", "pool_step", "source", "target"])
         with torch.no_grad():
             # concepts: [batch_size, max_num_nodes_final_layer, embedding_dim_out_final_layer] the node embeddings of the final graph
@@ -490,16 +532,18 @@ class Analyzer():
                     concept_colors = ColorUtils.rgb_colors[assignment, :]
 
                     node_assignment = node_concepts[pool_step][graph_i][masks[pool_step][graph_i]].detach().cpu()
-                    ColorUtils.ensure_min_rgb_colors(torch.max(node_assignment) + 1)
+                    ColorUtils.ensure_min_rgb_feature_colors(torch.max(node_assignment) + 1)
                     # [num_nodes, 3] (intermediate dimensions: num_nodes x num_clusters x 3)
-                    feature_colors = ColorUtils.rgb_colors[node_assignment, :]
+                    feature_colors = ColorUtils.rgb_feature_colors[node_assignment, :]
                     for i, i_old in enumerate(masks[pool_step][graph_i].nonzero().squeeze(1)):
                         node_table.add_data(graph_i, pool_step, i, feature_colors[i, 0].item(),
                                             feature_colors[i, 1].item(), feature_colors[i, 2].item(),
                                             ColorUtils.rgb2hex_tensor(concept_colors[i, :]),
                                             f"Cluster {assignment[i]}",
                                             ", ".join([f"{m.item():.2f}" for m in
-                                                       pool_activations[pool_step][graph_i, i_old, :].cpu()]))
+                                                       pool_activations[pool_step][graph_i, i_old, :].cpu()]),
+                                            "" if pool_step > 0 or ColorUtils.feature_labels is None
+                                            else ColorUtils.feature_labels[node_assignment[i]])
 
                     edge_index, _, _ = adj_to_edge_index(adjs[pool_step][graph_i:graph_i+1, :, :],
                                                          masks[pool_step][graph_i:graph_i+1])
@@ -538,23 +582,34 @@ class Analyzer():
         for seed in seeds:
             torch.manual_seed(seed)
             np.random.seed(seed)
-            train_data = self.load_required_data(self.train_loader, data_part, "train",
+
+            train_set_size = math.floor(data_part * len(self.train_loader.dataset))
+            test_set_size = math.floor(data_part * len(self.test_loader.dataset))
+            data_loader = self.train_loader.__class__(self.train_loader.dataset[:train_set_size] +
+                                                      self.test_loader.dataset[:test_set_size],
+                                                      self.train_loader.batch_size)
+
+            all_data = self.load_required_data(data_loader, 1, "joint train and test",
                                                  ["x", "target", "info_pooling_assignments"])
-            test_data = self.load_required_data(self.test_loader, data_part, "test",
-                                                 ["x", "target", "info_pooling_assignments"])
-            enumerate_feat = 2 ** torch.arange(train_data["x"].shape[-1],
-                                               device=train_data["x"].device)[None, None, :]
-            all_train_assignments = [torch.sum(train_data["x"].int() * enumerate_feat, dim=-1)] +\
+            # enumerate_feat = 2 ** torch.arange(all_data["x"].shape[-1],
+            #                                    device=all_data["x"].device)[None, None, :]
+            # Note that I can't calculate concept completeness for ASAP anyway as I have no mapping from nodes to concepts.
+            # so masks is not required in determinisitc_assignemnts
+            all_train_assignments = [torch.argmax(all_data["x"][:train_set_size], dim=-1)] +\
                                     Analyzer.deterministic_concept_assignments(self.model,
-                                                                               train_data["info_pooling_assignments"])
-            all_test_assignments = [torch.sum(test_data["x"].int() * enumerate_feat, dim=-1)] + \
+                                                                               [None if d is None else d[:train_set_size]
+                                                                                for d in all_data["info_pooling_assignments"]],
+                                                                               None)
+            all_test_assignments = [torch.argmax(all_data["x"][train_set_size:], dim=-1)] + \
                                    Analyzer.deterministic_concept_assignments(self.model,
-                                                                              test_data["info_pooling_assignments"])
+                                                                              [None if d is None else d[train_set_size:]
+                                                                               for d in all_data["info_pooling_assignments"]],
+                                                                              None)
             result = []
             for pool_step, (train_assignments, test_assignments) in enumerate(zip(all_train_assignments,
                                                                                   all_test_assignments)):
                 if train_assignments is None:
-                    continue  # For non-MonteCarlo layers
+                    continue  # For non-pooling layers
                 num_concepts = max(torch.max(train_assignments), torch.max(test_assignments)) + 1
                 batched_bincount = vmap(partial(torch.bincount, minlength=num_concepts + 1))
 
@@ -566,8 +621,8 @@ class Analyzer():
                     multisets_train = multisets_train.bool().int()
                     multisets_test = multisets_test.bool().int()
 
-                result.append(self._decision_tree_acc(multisets_train.cpu(), train_data["target"].squeeze(),
-                                                      multisets_test.cpu(), test_data["target"].squeeze()))
+                result.append(self._decision_tree_acc(multisets_train.cpu(), all_data["target"][:train_set_size].squeeze(),
+                                                      multisets_test.cpu(), all_data["target"][train_set_size:].squeeze()))
             results.append(result)
         # [num_seeds, num_mc_blocks + 1]
         results = torch.tensor(results)
