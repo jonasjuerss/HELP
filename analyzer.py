@@ -3,7 +3,7 @@ import math
 import warnings
 from dataclasses import dataclass
 from functools import partial
-from typing import Optional, Type, List, Sequence
+from typing import Optional, Type, List, Sequence, Tuple
 
 import matplotlib
 import networkx as nx
@@ -130,6 +130,7 @@ class Analyzer():
             res["batch"] = None if self.config.dense_data else torch.zeros(0, dtype=torch.long)
 
         remap_assignments = "info_pooling_assignments" in load_names and \
+                            data_loader.batch_size < set_size and\
                             any(isinstance(b, MonteCarloBlock) and \
                                 not isinstance(b.cluster_alg, SequentialKMeansMeanShiftWrapper) and\
                                 not b.global_clusters
@@ -249,7 +250,7 @@ class Analyzer():
                             new_ass[res["info_pooling_assignments"][pool_step][batch_i]]
                         if torch.any(torch.unique(new_ass, return_counts=True)[1] > 1):
                             warnings.warn("Different centroids were mapped to the same global cluster!")
-        if "centroids" not in load_names:
+        if "centroids" in res and "centroids" not in load_names:
             del res["centroids"]
 
         print(f"Loaded {set_size} {mode} samples. Accuracy {100 * correct / set_size:.2f}%")
@@ -281,7 +282,7 @@ class Analyzer():
         fill_colors = [ColorUtils.rgb2hex(int(n[r_i]), int(n[g_i]), int(n[b_i])) for n in nodes]
         data = Data(edge_index=edge_index, num_nodes=num_nodes)
         g = torch_geometric.utils.to_networkx(data, to_undirected=not directed)
-        nx.draw(g, node_color=fill_colors, edgecolors=border_colors, linewidths=2, node_size=node_size,
+        nx.draw(g, node_color=fill_colors, edgecolors=border_colors, linewidths=6, node_size=node_size,
                 labels={i: l for i, l in enumerate(n[label_i] for n in nodes)})
         # pos = nx.spring_layout(g)
         # drawn_nodes = nx.draw_networkx_nodes(g, pos, node_size=node_size)
@@ -304,77 +305,12 @@ class Analyzer():
         if torch.any(torch.max(x, dim=-1)[0] != 1) or torch.any(torch.sum(x, dim=-1) != 1) or torch.any(x < 0):
             raise ValueError("Node features are expected to be one-hot!")
 
-    def find_subgraph(self, search_edge_index: torch.Tensor, search_concepts: torch.Tensor, pool_step: int,
-                      load_part: float = 1, save_path: Optional[str] = None):
-        """
-
-        :param search_edge_index:
-        :param search_concepts: [num_nodes] integer tensor with the argmax input features (if pool_level == 0) or the concepts
-            of the input nodes (otherwise)
-        :param pool_step:
-        :param load_part:
-        :param save_path:
-        :return:
-        """
-        required_fields = ["info_pooling_assignments"]
-        if pool_step != 0:
-            required_fields += ["info_all_batch_or_mask", "info_adjs_or_edge_indices", "info_node_assignments"]
-        else:
-            required_fields += ["x", "mask", "adj"]
-        test_data = self.load_required_data(self.test_loader, load_part, "test", required_fields)
-
-        if pool_step == 0:
-            self.check_one_hot(test_data["x"][test_data["mask"]])
-            initial_concepts = torch.argmax(test_data["x"], dim=-1).cpu()
-            adj = test_data["adj"].cpu()
-            mask = test_data["mask"].cpu()
-        else:
-            initial_concepts = test_data["info_node_assignments"][pool_step - 1].cpu()
-            adj = test_data["info_adjs_or_edge_indices"][pool_step - 1].cpu()
-            mask = test_data["info_all_batch_or_mask"][pool_step - 1].cpu()
-        assignment = test_data["info_pooling_assignments"][pool_step].cpu()
-
-        subgraph = to_networkx(
-            Data(concept=search_concepts, edge_index=search_edge_index, num_nodes=search_concepts.shape[0]),
-            to_undirected=not self.dataset_wrapper.is_directed, node_attrs=["concept"])
-
-        checked = torch.logical_not(mask)  # masked nodes count as checked
-        # Would easily be parallelizable over samples
-        concept_counts = torch.zeros(torch.max(assignment) + 1, dtype=torch.int)
-        occurence_counts = torch.zeros(torch.max(assignment) + 1, dtype=torch.int)
-        for sample in tqdm(range(checked.shape[0])):
-            edge_index, _, _ = adj_to_edge_index(adj[sample], mask[sample])
-            edge_index = edge_index[:, assignment[sample, edge_index[0, :]] == assignment[sample, edge_index[1, :]]]
-            for node in range(checked.shape[1]):
-                if checked[sample, node]:
-                    continue
-
-                nodes_in_cur_graph = torch.sum(mask[sample]).item()
-                subset, edge_index_loc, mapping, _ = k_hop_subgraph(node, nodes_in_cur_graph,
-                                                                    edge_index,
-                                                                    relabel_nodes=True,
-                                                                    num_nodes=nodes_in_cur_graph)
-                checked[sample, mapping] = True
-                concept_counts[assignment[sample, node]] += 1
-                if subset.shape[0] != search_concepts.shape[0]:
-                    continue
-
-                cur_graph = to_networkx(Data(concept=initial_concepts[sample][subset], edge_index=edge_index_loc,
-                                             num_nodes=subset.shape[0]),
-                                        to_undirected=not self.dataset_wrapper.is_directed,
-                                        node_attrs=["concept"])
-
-                if nx.is_isomorphic(cur_graph, subgraph, node_match=iso.categorical_node_match("concept", None)):
-                    occurence_counts[assignment[sample, node]] += 1
-
-        fig, ax = plt.subplots()
-        ax.bar(np.arange(concept_counts.shape[0]), occurence_counts, label="occurences")
-        ax.bar(np.arange(concept_counts.shape[0]), concept_counts - occurence_counts, label="total",
-               bottom=occurence_counts)
-        if save_path:
-            fig.savefig(f"{save_path}.pdf", bbox_inches='tight')
-
-    def count_subgraphs(self, pool_step: int, load_part: float = 1, save_path: Optional[str] = None):
+    def count_subgraphs(self, pool_step: int, load_part: float = 1, plot_num_nodes: bool = False,
+                        plot_num_subgraphs: bool = True, min_occs_to_store: int = 10,
+                        max_neighborhoods_to_store: int = 3, save_path: Optional[str] = None, seed: int = 1):
+        # Note that the seed not only makes thing reproducible but also ensures that when running the same analysis for the next pool step, the previous concepts align with the features displayed in the next step
+        torch.manual_seed(seed)
+        np.random.seed(seed)
         required_fields = ["info_pooling_assignments"]
         if pool_step != 0:
             required_fields += ["info_all_batch_or_mask", "info_adjs_or_edge_indices", "info_node_assignments"]
@@ -388,22 +324,29 @@ class Analyzer():
             adj = test_data["adj"].cpu()
             mask = test_data["mask"].cpu()
         else:
-            initial_concepts = test_data["info_node_assignments"][pool_step - 1].cpu()
+            # Note that in MonteCarlo the pooling assignments are already deterministic anyway
+            initial_concepts = \
+            Analyzer.deterministic_node_assignments(self.model, test_data["info_pooling_assignments"],
+                                                    test_data["info_node_assignments"])[pool_step - 1].cpu()
+            test_data["info_node_assignments"][pool_step - 1].cpu()
             adj = test_data["info_adjs_or_edge_indices"][pool_step - 1].cpu()
             mask = test_data["info_all_batch_or_mask"][pool_step - 1].cpu()
         assignment = test_data["info_pooling_assignments"][pool_step].cpu()
+        num_hops = self.model.graph_network.pool_blocks[pool_step].receptive_field
 
         checked = torch.logical_not(mask)  # masked nodes count as checked
         # Would easily be parallelizable over samples
-        concept_counts = torch.zeros(torch.max(assignment) + 1, dtype=torch.int)
+        num_concepts = torch.max(assignment) + 1
         buckets = {}
+        num_subgraphs_total = 0
         for sample in tqdm(range(checked.shape[0])):
             nodes_in_cur_graph = torch.sum(mask[sample]).item()
-            edge_index, _, _ = adj_to_edge_index(adj[sample], mask[sample])
+            edge_index_full, _, _ = adj_to_edge_index(adj[sample], mask[sample])
             # plot_nx_graph(to_networkx(Data(#concept=initial_concepts[sample][mask[sample]],
             #     concept=assignment[sample][mask[sample]], edge_index=edge_index, num_nodes=nodes_in_cur_graph), to_undirected=not self.dataset_wrapper.is_directed, node_attrs=["concept"]))
             # plt.show()
-            edge_index = edge_index[:, assignment[sample, edge_index[0, :]] == assignment[sample, edge_index[1, :]]]
+            edge_index = edge_index_full[:,
+                         assignment[sample, edge_index_full[0, :]] == assignment[sample, edge_index_full[1, :]]]
 
             # plot_nx_graph(to_networkx(Data(concept=assignment[sample][mask[sample]], edge_index=edge_index, num_nodes=nodes_in_cur_graph), to_undirected=not self.dataset_wrapper.is_directed, node_attrs=["concept"]))
             # plt.show()
@@ -412,13 +355,13 @@ class Analyzer():
             for node in range(checked.shape[1]):
                 if checked[sample, node]:
                     continue
+                num_subgraphs_total += 1
                 subset, edge_index_loc, mapping, _ = k_hop_subgraph(node, nodes_in_cur_graph,
                                                                     edge_index,
                                                                     relabel_nodes=True,
                                                                     num_nodes=nodes_in_cur_graph)
-                checked[sample, mapping] = True
+                checked[sample, subset] = True
                 cur_concept = assignment[sample, node]
-                concept_counts[cur_concept] += 1
 
                 cur_graph = to_networkx(Data(concept=initial_concepts[sample][subset], edge_index=edge_index_loc,
                                              num_nodes=subset.shape[0]),
@@ -427,30 +370,119 @@ class Analyzer():
                 key = nx.algorithms.graph_hashing.weisfeiler_lehman_graph_hash(cur_graph, node_attr="concept")
 
                 if key in buckets:
-                    for other_graph, occurrences in buckets[key].items():
+                    for other_graph, (occurrences, _) in buckets[key].items():
                         if nx.is_isomorphic(other_graph, cur_graph,
                                             node_match=iso.categorical_node_match("concept", None)):
-                            buckets[key][other_graph][cur_concept] += 1
+                            buckets[key][other_graph][0][cur_concept] += 1
+                            # If subgraph is relevant (at least 10 occurrences), save some neighbourhoods
+                            if min_occs_to_store < buckets[key][other_graph][0][
+                                cur_concept] <= min_occs_to_store + max_neighborhoods_to_store:
+                                subset_n, edge_index_n, mapping_n, _ = k_hop_subgraph(subset, num_hops,
+                                                                                      edge_index_full,
+                                                                                      relabel_nodes=True,
+                                                                                      num_nodes=nodes_in_cur_graph)
+                                in_pool = torch.zeros(subset_n.shape[0], dtype=torch.bool)
+                                in_pool[mapping_n] = True
+                                neighborhood = to_networkx(
+                                    Data(concept=initial_concepts[sample][subset_n], in_pool=in_pool,
+                                         edge_index=edge_index_n,
+                                         num_nodes=subset_n.shape[0]),
+                                    to_undirected=not self.dataset_wrapper.is_directed,
+                                    node_attrs=["concept", "in_pool"])
+                                buckets[key][other_graph][1][cur_concept].append(neighborhood)
                             break
                     else:
-                        buckets[key][cur_graph] = one_hot(cur_concept, concept_counts.shape[0], dtype=torch.int)
+                        buckets[key][cur_graph] = one_hot(cur_concept, num_concepts, dtype=torch.int), [[] for _ in
+                                                                                                        range(
+                                                                                                            num_concepts)]
                 else:
-                    buckets[key] = {cur_graph: one_hot(cur_concept, concept_counts.shape[0], dtype=torch.int)}
+                    buckets[key] = {cur_graph: (
+                    one_hot(cur_concept, num_concepts, dtype=torch.int), [[] for _ in range(num_concepts)])}
 
         subgraphs = []
         for key in buckets:
-            for g, counts in buckets[key].items():
-                subgraphs.append((g, counts))
+            for g, (counts, examples) in buckets[key].items():
+                subgraphs.append((g, counts, examples))
         subgraphs.sort(key=lambda x: torch.sum(x[1]), reverse=True)
 
-        fig, ax = plt.subplots()
-        bottom = torch.zeros_like(concept_counts)
-        for i, (g, counts) in enumerate(subgraphs):
-            ax.bar(np.arange(concept_counts.shape[0]), counts, bottom=bottom, label=f"{i}")
-            bottom += counts
+        fig, axes = plt.subplots(1, 2 if plot_num_nodes and plot_num_subgraphs else 1,
+                                 figsize=(20 if plot_num_subgraphs and plot_num_nodes else 10, 6))
+        if plot_num_subgraphs:
+            ax_sub = axes if not plot_num_nodes else axes[0]
+            subgraph_threshold = 0.01 * num_subgraphs_total
+        if plot_num_nodes:
+            ax_nodes = axes if not plot_num_subgraphs else axes[1]
+            nodes_threshold = 0.01 * torch.sum(mask)
+        bottom = torch.zeros(num_concepts, dtype=torch.int)
+        bottom_numnodes = torch.zeros(num_concepts, dtype=torch.int)
+        for i, (g, counts, _) in enumerate(subgraphs):
+            if plot_num_subgraphs:
+                ax_sub.bar(np.arange(num_concepts), counts, bottom=bottom,
+                           label=f"{i}" if torch.max(counts) >= subgraph_threshold else None)
+                bottom += counts
+            if plot_num_nodes:
+                ax_nodes.bar(np.arange(num_concepts), counts * g.number_of_nodes(), bottom=bottom_numnodes,
+                             label=f"{i}" if torch.max(counts) * g.number_of_nodes() >= nodes_threshold else None)
+                bottom_numnodes += counts * g.number_of_nodes()
+        for ax in axes if plot_num_subgraphs and plot_num_nodes else [axes]:
+            ax.legend()
         if save_path:
             fig.savefig(f"{save_path}.pdf", bbox_inches='tight')
         return subgraphs
+
+    @staticmethod
+    def tuples_to_tensor(inputs: dict, **kwargs):
+        res = torch.empty(len(inputs), **kwargs)
+        for i, j in inputs.items():
+            res[i] = j
+        return res
+
+    @staticmethod
+    def plot_nx_concept_graph(graph, pool_step: int, ax=None):
+        if ax is None:
+            fig, ax = plt.subplots()
+        concepts = Analyzer.tuples_to_tensor(nx.get_node_attributes(graph, "concept"), dtype=torch.long)
+        in_pool_dict = nx.get_node_attributes(graph, "in_pool")
+        if in_pool_dict:
+            alpha = 0.3 + 0.7 * Analyzer.tuples_to_tensor(in_pool_dict)
+        else:
+            alpha = None
+
+        ColorUtils.ensure_min_hex_colors(torch.max(concepts) + 1)
+
+        pos = nx.spring_layout(graph)
+        nx.draw_networkx_nodes(graph, ax=ax, pos=pos, node_color=ColorUtils.hex_colors[concepts.numpy()], node_size=300,
+                               alpha=alpha)
+        nx.draw_networkx_edges(graph, ax=ax, pos=pos, alpha=0.3)
+
+        if ColorUtils.feature_labels is not None and pool_step == 0:
+            labels = {i: ColorUtils.feature_labels[concepts[i]] for i in range(concepts.shape[0])}
+        elif pool_step != 0:
+            labels = {i: f"{concepts[i]}" for i in range(concepts.shape[0])}
+        else:
+            labels = None
+        if labels is not None:
+            nx.draw_networkx_labels(graph, ax=ax, pos=pos, labels=labels)
+
+    @staticmethod
+    def plot_extended_concept_examples(subgraphs: List[Tuple[nx.Graph, torch.Tensor, List[List[nx.Graph]]]],
+                                       pool_step: int, num_concepts: int = 40, samples_per_concept: int = 3,
+                                       filter_subgraphs: Optional[List[int]] = None, save_path: Optional[str] = None):
+        split_concepts = []
+        for subgraph_i, (_, counts, samples) in enumerate(subgraphs):
+            for concept_i, count in enumerate(counts):
+                if count > 0 and (filter_subgraphs is None or subgraph_i in filter_subgraphs):
+                    split_concepts.append((subgraph_i, concept_i, count, samples[concept_i]))
+        split_concepts.sort(key=lambda x: x[2], reverse=True)
+
+        fig, axes = plt.subplots(num_concepts, samples_per_concept, figsize=(5 * samples_per_concept, 5 * num_concepts))
+        for i, (subgraph_i, concept_i, _, examples) in enumerate(split_concepts[:num_concepts]):
+            axes[i, 0].set_ylabel(f"Concept {concept_i}, subgraph {subgraph_i}")
+            for sample_i, example in enumerate(examples[:samples_per_concept + 1]):
+                Analyzer.plot_nx_concept_graph(example, pool_step, ax=axes[i, sample_i])
+        plt.show()
+        if save_path:
+            fig.savefig(f"{save_path}.pdf", bbox_inches='tight')
 
     @staticmethod
     def deterministic_concept_assignments(model: CustomNet, info_pooling_assignments: List[torch.Tensor],

@@ -87,6 +87,10 @@ class PoolBlock(torch.nn.Module, abc.ABC):
     def output_dim(self):
         return self.embedding_sizes[-1]
 
+    @property
+    def receptive_field(self):
+        return len(self.embedding_sizes) - 1
+
 class DenseNoPoolBlock(PoolBlock):
     """
     Dense layers without pooling
