@@ -161,7 +161,7 @@ class DenseGraphPoolingNetwork(GraphPoolingNetwork):
                 x, adj, _, probs, temp_loss, pool, node_ass, last_embedding, mask = res
                 results.append(res)
 
-        for res in results:
+        for i, res in enumerate(results):
             x_tmp, adj, _, probs, temp_loss, pool, node_ass, last_embedding, mask = res
             pooling_loss += temp_loss
             if collect_info:
@@ -172,7 +172,8 @@ class DenseGraphPoolingNetwork(GraphPoolingNetwork):
                 adjs.append(adj)
                 input_embeddings.append(x_tmp)
             if self.use_probability_weights and probs is not None:
-                probabilities = probs if probabilities is None else probabilities * probs
+                probabilities = probs if probabilities is None\
+                    else torch.repeat_interleave(probabilities, self._pool_blocks[i].num_mc_samples) * probs
         return x, probabilities, pooling_loss, pooling_assignments, node_assignments, pooling_activations, mask, adjs, masks, \
             input_embeddings, skipped_result
 
