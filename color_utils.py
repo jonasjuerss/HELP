@@ -79,7 +79,7 @@ class ColorUtils:
             warnings.warn(
                 f"Only {cls.rgb_feature_colors.shape[0]} colors given to distinguish {required_colors} "
                 f"features! Adding {new_num_colors * cls._rgb_colors_orig.shape[0]} from rgb colors.")
-            cls.rgb_colors = torch.cat((cls.rgb_feature_colors, cls._rgb_colors_orig.repeat(new_num_colors, 1)), dim=0)
+            cls.rgb_feature_colors = torch.cat((cls.rgb_feature_colors, cls._rgb_colors_orig.repeat(new_num_colors, 1)), dim=0)
 
     @classmethod
     def ensure_min_hex_feature_colors(cls, required_colors: int | torch.Tensor):
@@ -89,7 +89,7 @@ class ColorUtils:
             warnings.warn(
                 f"Only {cls.hex_feature_colors.shape[0]} colors given to distinguish {required_colors} "
                 f"features! Adding {new_num_colors * cls._hex_colors_orig.shape[0]} from hex colors.")
-            cls.rgb_colors = np.concatenate((cls.hex_feature_colors, np.tile(cls._hex_colors_orig, new_num_colors)),
+            cls.hex_feature_colors = np.concatenate((cls.hex_feature_colors, np.tile(cls._hex_colors_orig, new_num_colors)),
                                             axis=0)
 
 
