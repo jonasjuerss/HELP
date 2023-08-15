@@ -58,7 +58,7 @@ class ClusterAlgWrapper(abc.ABC, torch.nn.Module):
 
 class KMeansWrapper(ClusterAlgWrapper):
 
-    def __init__(self, **kwargs):
+    def __init__(self, trys: int = 1, **kwargs):
         super().__init__(**kwargs)
         # For backward compatibility:
         kwargs = {k.replace(".", "_"): v for k, v in kwargs.items()}
@@ -69,15 +69,22 @@ class KMeansWrapper(ClusterAlgWrapper):
                 kwargs[v] = kwargs[k]
                 del kwargs[k]
         self.kmeans = KMeans(**kwargs)
+        self.trys = trys
 
     def fit(self, X: torch.Tensor, train: bool = False) -> None:
-        self.kmeans.fit(X)
+        self.fit_predict(X, train)
 
     def predict(self, X: torch.Tensor) -> torch.Tensor:
         return self.kmeans.predict(X)
 
     def fit_predict(self, X: torch.Tensor, train: bool = False) -> torch.Tensor:
-        return self.kmeans.fit_predict(X)
+        best, best_cost = self.kmeans.fit_predict(X)
+        for _ in range(self.trys - 1):
+            res, cost = self.kmeans.fit_predict(X)
+            if cost < best_cost:
+                best = res
+                best_cost = cost
+        return best
 
     @property
     def centroids(self) -> torch.Tensor:

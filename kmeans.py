@@ -186,41 +186,46 @@ class KMeans(torch.nn.Module):
             self.centroids = X[np.random.choice(batch_size, size=[self.n_clusters], replace=False)].detach()
         else:
             self.centroids = centroids
-        num_points_in_clusters = torch.ones(self.n_clusters, device=device, dtype=X.dtype)
+        # num_points_in_clusters = torch.ones(self.n_clusters, device=device, dtype=X.dtype)
         closest = None
         for i in range(self.max_iter):
-            iter_time = time()
+            # iter_time = time()
             if self.minibatch is not None:
                 x = X[np.random.choice(batch_size, size=[self.minibatch], replace=False)]
             else:
                 x = X
             _, closest, neg_distances = self.max_sim(a=x, b=self.centroids)
-            matched_clusters, counts = closest.unique(return_counts=True)
+            # matched_clusters, counts = closest.unique(return_counts=True)
 
             c_grad = torch.zeros_like(self.centroids)
             if self._loop:
-                for j, count in zip(matched_clusters, counts):
-                    c_grad[j] = x[closest == j].sum(dim=0) / count
+                raise RuntimeError()
+                # for j, count in zip(matched_clusters, counts):
+                #     c_grad[j] = x[closest == j].sum(dim=0) / count
             else:
                 if self.minibatch is None:
+                    # [n_clusters, n_points] of cluster ids
                     expanded_closest = closest[None].expand(self.n_clusters, -1)
                     mask = (expanded_closest == torch.arange(self.n_clusters, device=device)[:, None]).to(X.dtype)
                     c_grad = mask @ x / mask.sum(-1)[..., :, None]
                     c_grad[c_grad != c_grad] = 0  # remove NaNs
                 else:
-                    expanded_closest = closest[None].expand(len(matched_clusters), -1)
-                   # mask = (expanded_closest == matched_clusters[:, None]).to(X.dtype)
+                    pass
+                    # expanded_closest = closest[None].expand(len(matched_clusters), -1)
+                    # mask = (expanded_closest == matched_clusters[:, None]).to(X.dtype)
 
             error = (c_grad - self.centroids).pow(2).sum()
-            if self.minibatch is not None:
-                lr = 1 / num_points_in_clusters[:, None] * 0.9 + 0.1
-                # lr = 1/num_points_in_clusters[:,None]**0.1
-            else:
-                lr = 1
-            num_points_in_clusters[matched_clusters] += counts
-            self.centroids = self.centroids * (1 - lr) + c_grad * lr
-            if self.verbose >= 2:
-                print('iter:', i, 'error:', error.item(), 'time spent:', round(time() - iter_time, 4))
+            cost = (c_grad[closest] - x).pow(2).sum()
+            # if self.minibatch is not None:
+            #     lr = 1 / num_points_in_clusters[:, None] * 0.9 + 0.1
+            #     # lr = 1/num_points_in_clusters[:,None]**0.1
+            # else:
+            #     lr = 1
+            # num_points_in_clusters[matched_clusters] += counts
+            self.centroids = c_grad
+            # self.centroids = self.centroids * (1 - lr) + c_grad * lr
+            # if self.verbose >= 2:
+            #     print('iter:', i, 'error:', error.item(), 'time spent:', round(time() - iter_time, 4))
             if error <= self.tol:
                 break
 
@@ -241,7 +246,7 @@ class KMeans(torch.nn.Module):
         if self.verbose >= 1:
             print(
                 f'used {i + 1} iterations ({round(time() - start_time, 4)}s) to cluster {batch_size} items into {self.n_clusters} clusters')
-        return closest
+        return closest, cost
 
     def predict(self, X):
         """
