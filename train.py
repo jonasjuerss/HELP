@@ -220,8 +220,14 @@ current_dataset = UniqueHierarchicalMotifDataset([HouseMotif([0], [0], 1),
                                                  num_intermediate_nodes=1,
                                                  perturb=0.0)
 
+
 # current_dataset = SimpleMotifCategorizationDataset([SetMotif([CircleMotif(3, [0], 1), CircleMotif(3, [0], 1)]),
 #                                                     CircleMotif(6, [0], 1)])
+
+# Expressivity
+# current_dataset = SimpleMotifCategorizationDataset([ReplicationMotif(CircleMotif(3, [0], 1, 20, 1), 2),
+#                                                     CircleMotif(6, [0], 1, 40, 2)])
+
 
 # The two hexagons themselves with the random node colors they have in the hierarchical dataset are distinguishable by WL
 # current_dataset = SimpleMotifCategorizationDataset([IntermediateNodeMotif(CrossHexagon([0, 1, 2, 3, 4, 5], 7), 1, 6),
@@ -336,20 +342,25 @@ def main(args, **kwargs):
     output_layer = output_layers.from_name(args.output_layer)
     gnn_activation = getattr(torch.nn.functional, args.gnn_activation)
     pooling_block_types = [poolblocks.poolblock.from_name(pt, args.dense_data) for pt in args.pooling_type]
+
+    state_dict = None if restore_path is None else torch.load(restore_path, map_location=device)
     model = CustomNet(dataset_wrapper.num_node_features, dataset_wrapper.num_classes, args=args, device=device,
                       output_layer_type=output_layer,
                       pooling_block_types=pooling_block_types,
                       conv_type=conv_type, activation_function=gnn_activation,
-                      directed_graphs=dataset_wrapper.is_directed)
+                      directed_graphs=dataset_wrapper.is_directed,
+                      state_dict=None if state_dict is None else state_dict["model"])
 
     optimizer_params = None
     if restore_path is not None:
-        state_dict = torch.load(restore_path, map_location=device)
         if "model" in state_dict and "optimizer" in state_dict and len(state_dict) == 2:
-            model.load_state_dict(state_dict["model"])
+            model.load_state_dict(state_dict["model"], strict=False)
             optimizer_params = state_dict["optimizer"]
-            print("Warning: resuming a training run is equivalent to continuing the same run in expectation but may"
-                  " not give the same result deterministically due to the reset of the random seed.")
+            # warnings.warn("Warning: currently, the centroids are not restored due to a PyTorch bug "
+            #               "(https://github.com/pytorch/pytorch/issues/8104). This is problematic when analyzing "
+            #               "KMeansMeanShift or global clusters.") Fixed by passing state dict manually
+            warnings.warn("Warning: resuming a training run is equivalent to continuing the same run in expectation but"
+                          " may  not give the same result deterministically due to the reset of the random seed.")
         else:
             print("Warning: optimizer state was not saved. "
                   "Resuming training will not be equivalent to letting it run.")

@@ -406,7 +406,7 @@ class MonteCarloBlock(PoolBlock):
                  forced_embeddings=None, directed_graphs: bool = True, cluster_alg: str = "KMeans",
                  final_bottleneck: typing.Optional[int] = None, global_clusters: bool = True, soft_sampling: float = 0,
                  clustering_loss_weight: float = 0.0, perturbation: typing.Optional[dict] = None,
-                 num_mc_samples: int = 1, transparency: float = 1, **kwargs):
+                 num_mc_samples: int = 1, transparency: float = 1, state_dict: typing.Optional[dict] = None, **kwargs):
         """
 
         :param embedding_sizes:
@@ -432,7 +432,9 @@ class MonteCarloBlock(PoolBlock):
         #     torch.nn.Linear(embedding_sizes[-1], embedding_sizes[-1]),
         #     torch.nn.ReLU(),
         #     torch.nn.Linear(embedding_sizes[-1], num_concepts))
-        self.cluster_alg = clustering_wrappers.get_from_name(cluster_alg)(**kwargs)
+        if state_dict is None:
+            state_dict = {}
+        self.cluster_alg = clustering_wrappers.get_from_name(cluster_alg)(**kwargs, **state_dict)
 
         self.seen_embeddings = torch.empty((0, self.num_output_features), device=custom_logger.device)
         self.global_clusters = global_clusters

@@ -1,5 +1,6 @@
 import dataclasses
 import math
+import re
 import warnings
 from dataclasses import dataclass
 from functools import partial
@@ -8,6 +9,7 @@ from typing import Optional, Type, List, Sequence, Tuple
 import matplotlib
 import networkx as nx
 import numpy as np
+import sklearn
 import torch_geometric
 import wandb
 from functorch import vmap
@@ -15,6 +17,7 @@ from matplotlib import pylab, pyplot as plt
 import torch
 from sklearn.base import BaseEstimator
 from sklearn.cluster import KMeans
+from sklearn.datasets import load_iris
 from sklearn.manifold import TSNE
 from torch.utils.data import Subset
 from torch_geometric.data import Data
@@ -31,6 +34,7 @@ from custom_net import InferenceInfo, CustomNet
 from data_generation.custom_dataset import HierarchicalMotifGraphTemplate
 from data_generation.dataset_wrappers import CustomDatasetWrapper
 from graphutils import adj_to_edge_index, mask_to_batch, one_hot
+from plotstyle import set_dim
 from poolblocks.poolblock import DenseNoPoolBlock, SparseNoPoolBlock, DiffPoolBlock, MonteCarloBlock, ASAPBlock
 from train import main
 import custom_logger
@@ -107,7 +111,9 @@ class Analyzer():
         :return:
         """
         set_size = math.floor(load_part * len(data_loader.dataset))
-        data_loader = data_loader.__class__(data_loader.dataset[:set_size], data_loader.batch_size)
+        # Avoids indexing issues with concat dataset when load_part == 1 anyway
+        if load_part != 1:
+            data_loader = data_loader.__class__(data_loader.dataset[:set_size], data_loader.batch_size)
         num_classes = self.dataset_wrapper.num_classes
         max_nodes = self.dataset_wrapper.max_nodes_per_graph
         num_node_features = self.dataset_wrapper.num_node_features
@@ -159,7 +165,7 @@ class Analyzer():
         with torch.no_grad():
             for batch_i, data in tqdm(enumerate(data_loader), total=math.ceil(set_size / data_loader.batch_size)):
                 target = data.y
-                if self.config.dense_data:
+                if target.ndim == 2:
                     target = target.squeeze(1)
                 sample_i_new = sample_i + target.shape[0]
                 if "target" in load_names:
@@ -253,6 +259,8 @@ class Analyzer():
         if "centroids" in res and "centroids" not in load_names:
             del res["centroids"]
 
+        if "x" in load_names and res["x"].shape[-1] == 0:
+            res["x"] = torch.ones(*res["x"].shape[:-1], 1)
         print(f"Loaded {set_size} {mode} samples. Accuracy {100 * correct / set_size:.2f}%")
         return res # data, out, concepts, info, y_pred
 
@@ -307,22 +315,61 @@ class Analyzer():
 
     def count_subgraphs(self, pool_step: int, load_part: float = 1, plot_num_nodes: bool = False,
                         plot_num_subgraphs: bool = True, min_occs_to_store: int = 10,
-                        max_neighborhoods_to_store: int = 3, save_path: Optional[str] = None, seed: int = 1):
+                        max_neighborhoods_to_store: int = 3, use_k_hop: bool = False, save_path: Optional[str] = None,
+                        seed: int = 1, inference_with_train: bool = False, use_only_test: bool = True, horizontal: bool = False,
+                        purity_threshold: float = 0.1):
+        """
+
+        :param pool_step:
+        :param load_part:
+        :param plot_num_nodes:
+        :param plot_num_subgraphs:
+        :param min_occs_to_store:
+        :param max_neighborhoods_to_store:
+        :param use_k_hop: If true, the generated subgraph for each node will be its k-hop neighborhood rather than all
+        connected nodes with the same assignment. This is the way GCExplainer defines concepts
+        :param save_path:
+        :param seed:
+        :param inference_with_train: If True, includes the train data in the inference. This has the sole purpose of
+        deterministically producing the same clustering as the decision trees generated in the concept completeness
+        :return:
+        """
         # Note that the seed not only makes thing reproducible but also ensures that when running the same analysis for the next pool step, the previous concepts align with the features displayed in the next step
+        assert inference_with_train or use_only_test
         torch.manual_seed(seed)
         np.random.seed(seed)
         required_fields = ["info_pooling_assignments"]
         if pool_step != 0:
             required_fields += ["info_all_batch_or_mask", "info_adjs_or_edge_indices", "info_node_assignments"]
         else:
-            required_fields += ["x", "mask", "adj"]  # TODO use test if not significantly worse
-        test_data = self.load_required_data(self.train_loader, load_part, "train", required_fields)
+            required_fields += ["x", "mask", "adj"]
+
+        if inference_with_train:
+            data_loader = self.train_loader.__class__(self.train_loader.dataset + self.test_loader.dataset, self.train_loader.batch_size)
+            assert load_part == 1
+        else:
+            data_loader = self.test_loader
+        test_data = self.load_required_data(data_loader, load_part,
+                                            ("train and " if inference_with_train else "") + "test",
+                                            required_fields)
+
+        if use_only_test:
+            test_size = len(self.test_loader.dataset)
+            def cut(t):
+                if isinstance(t, list):
+                    return [None if e is None else e[:test_size] for e in t]
+                elif isinstance(t, torch.Tensor):
+                    return t[:test_size]
+                elif t is None:
+                    return None
+                raise ValueError()
+            test_data = {k: cut(v) for k, v in test_data.items()}
 
         if pool_step == 0:
             self.check_one_hot(test_data["x"][test_data["mask"]])
             initial_concepts = torch.argmax(test_data["x"], dim=-1).cpu()
             adj = test_data["adj"].cpu()
-            mask = test_data["mask"].cpu()
+            mask = test_data["mask"]
         else:
             # Note that in MonteCarlo the pooling assignments are already deterministic anyway
             initial_concepts = \
@@ -330,23 +377,32 @@ class Analyzer():
                                                     test_data["info_node_assignments"])[pool_step - 1].cpu()
             test_data["info_node_assignments"][pool_step - 1].cpu()
             adj = test_data["info_adjs_or_edge_indices"][pool_step - 1].cpu()
-            mask = test_data["info_all_batch_or_mask"][pool_step - 1].cpu()
-        assignment = test_data["info_pooling_assignments"][pool_step].cpu()
+            mask = test_data["info_all_batch_or_mask"][pool_step - 1]
+        if mask is None:
+            mask = torch.ones(*adj.shape[:2], dtype=torch.bool)
+        else:
+            mask = mask.cpu()
+        assignment = Analyzer.deterministic_concept_assignments(self.model, test_data["info_pooling_assignments"],
+                                                                None)[pool_step].cpu()
         num_hops = self.model.graph_network.pool_blocks[pool_step].receptive_field
 
         checked = torch.logical_not(mask)  # masked nodes count as checked
         # Would easily be parallelizable over samples
-        num_concepts = torch.max(assignment) + 1
+        num_concepts = torch.max(assignment).item() + 1
         buckets = {}
         num_subgraphs_total = 0
+        concept_counts = torch.zeros(num_concepts, dtype=torch.int)
         for sample in tqdm(range(checked.shape[0])):
             nodes_in_cur_graph = torch.sum(mask[sample]).item()
             edge_index_full, _, _ = adj_to_edge_index(adj[sample], mask[sample])
             # plot_nx_graph(to_networkx(Data(#concept=initial_concepts[sample][mask[sample]],
             #     concept=assignment[sample][mask[sample]], edge_index=edge_index, num_nodes=nodes_in_cur_graph), to_undirected=not self.dataset_wrapper.is_directed, node_attrs=["concept"]))
             # plt.show()
-            edge_index = edge_index_full[:,
-                         assignment[sample, edge_index_full[0, :]] == assignment[sample, edge_index_full[1, :]]]
+            if use_k_hop:
+                edge_index = edge_index_full
+            else:
+                edge_index = edge_index_full[:,
+                             assignment[sample, edge_index_full[0, :]] == assignment[sample, edge_index_full[1, :]]]
 
             # plot_nx_graph(to_networkx(Data(concept=assignment[sample][mask[sample]], edge_index=edge_index, num_nodes=nodes_in_cur_graph), to_undirected=not self.dataset_wrapper.is_directed, node_attrs=["concept"]))
             # plt.show()
@@ -356,17 +412,24 @@ class Analyzer():
                 if checked[sample, node]:
                     continue
                 num_subgraphs_total += 1
-                subset, edge_index_loc, mapping, _ = k_hop_subgraph(node, nodes_in_cur_graph,
+                subset, edge_index_loc, mapping, _ = k_hop_subgraph(node,
+                                                                    num_hops if use_k_hop else nodes_in_cur_graph,
                                                                     edge_index,
                                                                     relabel_nodes=True,
                                                                     num_nodes=nodes_in_cur_graph)
-                checked[sample, subset] = True
+                if use_k_hop:
+                    in_pool = torch.zeros(subset.shape[0], dtype=torch.bool)
+                    in_pool[mapping] = True
+                else:
+                    checked[sample, subset] = True
+                    in_pool = None
                 cur_concept = assignment[sample, node]
+                concept_counts[cur_concept] += 1
 
                 cur_graph = to_networkx(Data(concept=initial_concepts[sample][subset], edge_index=edge_index_loc,
-                                             num_nodes=subset.shape[0]),
+                                             num_nodes=subset.shape[0], in_pool=in_pool),
                                         to_undirected=not self.dataset_wrapper.is_directed,
-                                        node_attrs=["concept"])
+                                        node_attrs=["concept"] + (["in_pool"] if use_k_hop else []))
                 key = nx.algorithms.graph_hashing.weisfeiler_lehman_graph_hash(cur_graph, node_attr="concept")
 
                 if key in buckets:
@@ -375,20 +438,22 @@ class Analyzer():
                                             node_match=iso.categorical_node_match("concept", None)):
                             buckets[key][other_graph][0][cur_concept] += 1
                             # If subgraph is relevant (at least 10 occurrences), save some neighbourhoods
-                            if min_occs_to_store < buckets[key][other_graph][0][
-                                cur_concept] <= min_occs_to_store + max_neighborhoods_to_store:
-                                subset_n, edge_index_n, mapping_n, _ = k_hop_subgraph(subset, num_hops,
-                                                                                      edge_index_full,
-                                                                                      relabel_nodes=True,
-                                                                                      num_nodes=nodes_in_cur_graph)
-                                in_pool = torch.zeros(subset_n.shape[0], dtype=torch.bool)
-                                in_pool[mapping_n] = True
-                                neighborhood = to_networkx(
-                                    Data(concept=initial_concepts[sample][subset_n], in_pool=in_pool,
-                                         edge_index=edge_index_n,
-                                         num_nodes=subset_n.shape[0]),
-                                    to_undirected=not self.dataset_wrapper.is_directed,
-                                    node_attrs=["concept", "in_pool"])
+                            if min_occs_to_store <= buckets[key][other_graph][0][cur_concept] <= min_occs_to_store + max_neighborhoods_to_store:
+                                if use_k_hop:
+                                    neighborhood = cur_graph
+                                else:
+                                    subset_n, edge_index_n, mapping_n, _ = k_hop_subgraph(subset, num_hops,
+                                                                                          edge_index_full,
+                                                                                          relabel_nodes=True,
+                                                                                          num_nodes=nodes_in_cur_graph)
+                                    in_pool = torch.zeros(subset_n.shape[0], dtype=torch.bool)
+                                    in_pool[mapping_n] = True
+                                    neighborhood = to_networkx(
+                                        Data(concept=initial_concepts[sample][subset_n], in_pool=in_pool,
+                                             edge_index=edge_index_n,
+                                             num_nodes=subset_n.shape[0]),
+                                        to_undirected=not self.dataset_wrapper.is_directed,
+                                        node_attrs=["concept", "in_pool"])
                                 buckets[key][other_graph][1][cur_concept].append(neighborhood)
                             break
                     else:
@@ -405,30 +470,68 @@ class Analyzer():
                 subgraphs.append((g, counts, examples))
         subgraphs.sort(key=lambda x: torch.sum(x[1]), reverse=True)
 
-        fig, axes = plt.subplots(1, 2 if plot_num_nodes and plot_num_subgraphs else 1,
-                                 figsize=(20 if plot_num_subgraphs and plot_num_nodes else 10, 6))
-        if plot_num_subgraphs:
-            ax_sub = axes if not plot_num_nodes else axes[0]
-            subgraph_threshold = 0.01 * num_subgraphs_total
-        if plot_num_nodes:
-            ax_nodes = axes if not plot_num_subgraphs else axes[1]
-            nodes_threshold = 0.01 * torch.sum(mask)
-        bottom = torch.zeros(num_concepts, dtype=torch.int)
-        bottom_numnodes = torch.zeros(num_concepts, dtype=torch.int)
-        for i, (g, counts, _) in enumerate(subgraphs):
+        if plot_num_subgraphs or plot_num_nodes:
+            if horizontal:
+                figsize = (8.27, 11.69)
+            else:
+                figsize = (20 if plot_num_subgraphs and plot_num_nodes else 10, 6)
+            fig, axes = plt.subplots(1, 2 if plot_num_nodes and plot_num_subgraphs else 1, figsize=figsize)
+            if not horizontal:
+                set_dim(fig)
             if plot_num_subgraphs:
-                ax_sub.bar(np.arange(num_concepts), counts, bottom=bottom,
-                           label=f"{i}" if torch.max(counts) >= subgraph_threshold else None)
-                bottom += counts
+                ax_sub = axes if not plot_num_nodes else axes[0]
+                if horizontal:
+                    ax_sub.set_xlabel("assigned subgraphs")
+                else:
+                    ax_sub.set_ylabel("assigned subgraphs")
+                subgraph_threshold = 0.01 * num_subgraphs_total
             if plot_num_nodes:
-                ax_nodes.bar(np.arange(num_concepts), counts * g.number_of_nodes(), bottom=bottom_numnodes,
-                             label=f"{i}" if torch.max(counts) * g.number_of_nodes() >= nodes_threshold else None)
-                bottom_numnodes += counts * g.number_of_nodes()
-        for ax in axes if plot_num_subgraphs and plot_num_nodes else [axes]:
-            ax.legend()
-        if save_path:
-            fig.savefig(f"{save_path}.pdf", bbox_inches='tight')
-        return subgraphs
+                ax_nodes = axes if not plot_num_subgraphs else axes[1]
+                nodes_threshold = 0.01 * torch.sum(mask)
+                if horizontal:
+                    ax_nodes.set_xlabel("assigned nodes")
+                else:
+                    ax_nodes.set_ylabel("assigned nodes")
+            bottom = torch.zeros(num_concepts, dtype=torch.int)
+            bottom_numnodes = torch.zeros(num_concepts, dtype=torch.int)
+
+            for i, (g, counts, _) in enumerate(subgraphs):
+                if plot_num_subgraphs:
+                    if horizontal:
+                        ax_sub.barh(np.arange(num_concepts), counts, left=bottom,
+                                    label=f"{i}" if torch.max(counts) >= subgraph_threshold else None)
+                    else:
+                        ax_sub.bar(np.arange(num_concepts), counts, bottom=bottom,
+                                   label=f"{i}" if torch.max(counts) >= subgraph_threshold else None)
+                    bottom += counts
+                if plot_num_nodes:
+                    if horizontal:
+                        ax_nodes.barh(np.arange(num_concepts), counts * g.number_of_nodes(), left=bottom_numnodes,
+                                      label=f"{i}" if torch.max(counts) * g.number_of_nodes() >= nodes_threshold else None)
+                    else:
+                        ax_nodes.bar(np.arange(num_concepts), counts * g.number_of_nodes(), bottom=bottom_numnodes,
+                                     label=f"{i}" if torch.max(counts) * g.number_of_nodes() >= nodes_threshold else None)
+                    bottom_numnodes += counts * g.number_of_nodes()
+            for ax in axes if plot_num_subgraphs and plot_num_nodes else [axes]:
+                if horizontal:
+                    ax.set_ylabel("concept")
+                    ax.legend(bbox_to_anchor=(1.04, 1), borderaxespad=0, title="subgraph id")
+                else:
+                    # ax.legend(bbox_to_anchor=(1.04, 1), borderaxespad=0, title="subgraph id")
+                    ax.set_xlabel("concept")
+                # ax.spines["top"].set_visible(False)
+                # ax.spines["right"].set_visible(False)
+                # ax.spines["bottom"].set_visible(False)
+                # ax.spines["left"].set_visible(False)
+            if save_path:
+                fig.savefig(f"{save_path}", bbox_inches='tight')
+
+        pure_concept_counts = torch.zeros_like(concept_counts)
+        purity_thresholds = purity_threshold * concept_counts
+        for _, counts, _ in subgraphs:
+            pure_concept_counts += torch.where(counts > purity_thresholds, counts, 0)
+
+        return subgraphs, torch.where(counts > 0, pure_concept_counts / counts, 1)
 
     @staticmethod
     def tuples_to_tensor(inputs: dict, **kwargs):
@@ -448,11 +551,15 @@ class Analyzer():
         else:
             alpha = None
 
-        ColorUtils.ensure_min_hex_colors(torch.max(concepts) + 1)
+        if pool_step == 0:
+            ColorUtils.ensure_min_hex_feature_colors(torch.max(concepts) + 1)
+            node_color = ColorUtils.hex_feature_colors[concepts.numpy()]
+        else:
+            ColorUtils.ensure_min_hex_colors(torch.max(concepts) + 1)
+            node_color = ColorUtils.hex_colors[concepts.numpy()]
 
         pos = nx.spring_layout(graph)
-        nx.draw_networkx_nodes(graph, ax=ax, pos=pos, node_color=ColorUtils.hex_colors[concepts.numpy()], node_size=300,
-                               alpha=alpha)
+        nx.draw_networkx_nodes(graph, ax=ax, pos=pos, node_color=node_color, node_size=300, alpha=alpha)
         nx.draw_networkx_edges(graph, ax=ax, pos=pos, alpha=0.3)
 
         if ColorUtils.feature_labels is not None and pool_step == 0:
@@ -478,15 +585,16 @@ class Analyzer():
         fig, axes = plt.subplots(num_concepts, samples_per_concept, figsize=(5 * samples_per_concept, 5 * num_concepts))
         for i, (subgraph_i, concept_i, _, examples) in enumerate(split_concepts[:num_concepts]):
             axes[i, 0].set_ylabel(f"Concept {concept_i}, subgraph {subgraph_i}")
-            for sample_i, example in enumerate(examples[:samples_per_concept + 1]):
+            for sample_i, example in enumerate(examples[:samples_per_concept]):
                 Analyzer.plot_nx_concept_graph(example, pool_step, ax=axes[i, sample_i])
         plt.show()
         if save_path:
-            fig.savefig(f"{save_path}.pdf", bbox_inches='tight')
+            fig.savefig(f"{save_path}", bbox_inches='tight')
 
     @staticmethod
     def deterministic_concept_assignments(model: CustomNet, info_pooling_assignments: List[torch.Tensor],
                                           masks: List[torch.Tensor]) -> List[torch.Tensor]:
+        dummy = model.graph_network.pool_blocks
         res = []
         for i, (block, ass) in enumerate(zip(model.graph_network.pool_blocks, info_pooling_assignments)):
             if block.__class__ == DiffPoolBlock:
@@ -592,7 +700,8 @@ class Analyzer():
 
     @staticmethod
     def _decision_tree_acc(X_train: np.ndarray, Y_train: np.ndarray, X_test: Optional[np.ndarray] = None,
-                           Y_test: Optional[np.ndarray] = None) -> float:
+                           Y_test: Optional[np.ndarray] = None, return_tree: bool = False, **kwargs) ->\
+            float | Tuple[float, DecisionTreeClassifier]:
         """
 
         :param X_train: [num_points, num_features] points to create the tree
@@ -601,17 +710,23 @@ class Analyzer():
         :param Y_test: [num_points] labels to measure accuracy (Y_train if not given)
         :return: accuracy of a decision tree fit to the given data
         """
-        tree = DecisionTreeClassifier()
+        tree = DecisionTreeClassifier(**kwargs)
         tree.fit(X_train, Y_train)
-        return tree.score(X_test if X_test is not None else X_train, Y_test if Y_test is not None else Y_train)
+        acc = tree.score(X_test if X_test is not None else X_train, Y_test if Y_test is not None else Y_train)
+        if return_tree:
+            return acc, tree
+        return acc
 
-    def calculate_concept_completeness(self, multiset: bool = True, data_part: float = 1.0, seeds: List[int] = [0]) ->\
+    def calculate_concept_completeness(self, multiset: bool = True, data_part: float = 1.0, seeds: List[int] = [1],
+                                       plot_tree: bool = False, max_depth: Optional[int] = None,
+                                       save_path: Optional[str] = None, verbose: bool = True) ->\
             torch.Tensor:
         """
         Important: For the inputs, this assumes one-hot encoding
         """
         results = []
         for seed in seeds:
+            trees = []
             torch.manual_seed(seed)
             np.random.seed(seed)
 
@@ -653,24 +768,43 @@ class Analyzer():
                     multisets_train = multisets_train.bool().int()
                     multisets_test = multisets_test.bool().int()
 
-                result.append(self._decision_tree_acc(multisets_train.cpu(), all_data["target"][:train_set_size].squeeze(),
-                                                      multisets_test.cpu(), all_data["target"][train_set_size:].squeeze()))
+                acc, tree = self._decision_tree_acc(multisets_train.cpu(), all_data["target"][:train_set_size].squeeze(),
+                                                    multisets_test.cpu(), all_data["target"][train_set_size:].squeeze(),
+                                                    return_tree=True, random_state=seed, max_depth=max_depth)
+                result.append(acc)
+                trees.append(tree)
             results.append(result)
         # [num_seeds, num_mc_blocks + 1]
         results = torch.tensor(results)
         stds, means = torch.std_mean(results, dim=0)
-        for i in range(stds.shape[0]):
-            print(f"{100*means[i]:.2f}%+-{100*stds[i]:.2f}")
-        return results
+        if verbose:
+            for i in range(stds.shape[0]):
+                print(f"{100*means[i]:.2f}%+-{100*stds[i]:.2f}")
+        if plot_tree:
+            for i, tree in enumerate(trees):
+                fig, ax = plt.subplots(figsize=(48, 12))
+                sklearn.tree.plot_tree(tree, ax=ax, proportion=True,
+                                       class_names=self.dataset_wrapper.class_names, fontsize=11, impurity=True)
 
-        # dataset_instance = self.dataset_wrapper.get_dataset(self.config.dense_data, 0)
-        # if isinstance(self.dataset_wrapper, CustomDatasetWrapper):
-        #     if isinstance(self.dataset_wrapper.sampler, HierarchicalMotifGraphTemplate):
-        #         raise NotImplementedError()
-        #     else:
-        #         raise NotImplementedError()
-        # else:
-        #     raise NotImplementedError()
+                # up = False
+                def replace_text(obj):
+                    # nonlocal up
+                    if type(obj) == matplotlib.text.Annotation:
+                        txt = obj.get_text()
+                        txt = re.sub("value[^$]*class", "class", txt)
+                        txt = re.sub(":", ":\n", txt)
+                        obj.set_text(txt)
+                        # obj.set(y=obj.xy[1]+0.02)
+                    # up = not up
+                    return obj
+
+                # Remove "value" https://stackoverflow.com/questions/70553185/how-to-plot-tree-without-showing-samples-and-value-in-random-forest
+                ax.properties()['children'] = [replace_text(i) for i in ax.properties()['children']]
+
+                if save_path is not None:
+                    fig.savefig(f"{save_path}_{i}.pdf")
+                plt.show()
+        return results
 
     def plot_clusters(self, cluster_alg: Optional[Type[ClusterAlgWrapper]] = None, save_path: Optional[str] = None,
                       dim_reduc: Type[BaseEstimator] = TSNE, data_part: float = 1.0, **cluster_alg_kwargs):
@@ -721,147 +855,3 @@ class Analyzer():
             fig.show()
             if save_path is not None:
                 fig.savefig(f"{save_path}_{i}.pdf", bbox_inches='tight')
-
-    ###################################################### Legacy ######################################################
-    # def plot_clusters(self, K: int):
-    #     # [num_nodes_total, x, y] (PCA or t-SNE)
-    #     coords = TSNE(n_components=2).fit_transform(X=self.x_out_all)
-    #     kmeans = KMeans(n_clusters=K).fit(X=self.x_out_all)
-    #     # [num_nodes_total] with integer values between 0 and K/num_clusters/num_concepts
-    #     clusters = kmeans.labels_
-    #
-    #     markers = ["o", "p", "s", "P", "*", "D", "^", "+", "x"]
-    #
-    #     fig, ax = plt.subplots()
-    #     for i in range(self.model.output_dim):
-    #         # Note, we could also evaluate how the model classifies (y_pred_all) instead of the ground truth (y_all) for explainability
-    #         ax.scatter(coords[self.y_all_nodes == i, 0], coords[self.y_all_nodes == i, 1],
-    #                    c=hex_colors[clusters[self.y_all_nodes == i]],
-    #                    marker=markers[i], s=10)
-
-    def draw_neighbourhood(self, ax, node_index: int):
-        subset, edge_index, mapping, _ = k_hop_subgraph(node_index, self.num_hops, torch.tensor(self.edge_index_all),
-                                                        relabel_nodes=True)
-        g = torch_geometric.utils.to_networkx(Data(x=subset, edge_index=edge_index), to_undirected=True)
-        highlight_mask = np.zeros(subset.shape[0], dtype=int)
-        highlight_mask[mapping] = 1
-        labels = self.dataset_wrapper.get_node_labels(self.x_all[subset])
-        nx.draw(g, ax=ax, node_color=self.dataset_wrapper.get_node_colors(self.annot_all[subset]),
-                edgecolors="#8e44ad",
-                linewidths=3.0*highlight_mask, labels={i: labels[i] for i in range(labels.shape[0])},
-                font_color="whitesmoke")
-
-    def plot_closest_embeddings(self, embeddings: np.ndarray, labels, save_path=None, num_plots = 5):
-        """
-        For each row in embeddings, plots the num_gnn_layers-hop neighbourhood of the num_plots closest embeddings in x_out_all
-        :param embeddings: [num_embeddings, gnn_output_embedding_size]
-        """
-        fig, axes = plt.subplots(embeddings.shape[0], num_plots, figsize=(15, embeddings.shape[0] * 5))
-        for i in range(embeddings.shape[0]):
-            # CAUTION: we are using TOP k, so we need a minus in front to find the ones with smallest distance
-            # indices of the num_plots nodes that are closest to the center of concept
-            _, indices = torch.topk(-torch.norm(torch.tensor(embeddings[i:i+1, :] - self.x_out_all), dim=-1), k=num_plots, dim=0)
-            axes[i][0].set_title(f"{labels[i]}", rotation='vertical', x=-0.1, y=0.5)
-            for j in range(num_plots):
-                self.draw_neighbourhood(axes[i][j], indices[j].item())
-        if save_path is not None:
-            fig.savefig(save_path, bbox_inches='tight')
-        return fig
-
-    def draw_graph(self, sample: int, color_concepts=False, save_path=None, figsize=(7, 7)):
-        fig, ax = plt.subplots(figsize=figsize)
-        ax.axis('off')
-        mask = self.batch_all == sample
-        node_indices = np.arange(self.x_all.shape[0])[mask]
-        start_index, end_index = node_indices[0].item(), node_indices[-1].item()
-        edge_index = self.edge_index_all[:,
-                     np.logical_and(self.edge_index_all[0] >= start_index, self.edge_index_all[0] <= end_index)] - start_index
-        x = self.x_all[mask]
-        g = torch_geometric.utils.to_networkx(Data(x=torch.tensor(x), edge_index=torch.tensor(edge_index)),
-                                              to_undirected=True)
-        labels = self.dataset_wrapper.get_node_labels(x)
-        pred_str = ", ".join([f"{100 * f:.0f}%" for f in np.exp(self.out_all[sample])])
-        if color_concepts:
-            # IMPORANT: Note that colors of clusters will not be consistent among different samples this way
-            _, predicted_clusters = np.unique(np.argmax(self.x_out_all[mask], axis=1), return_inverse=True)
-            colors = ColorUtils.hex_colors[predicted_clusters]
-        else:
-            colors = self.dataset_wrapper.get_node_colors(self.annot_all[mask])
-        ax.set_title(
-            f"class: {self.y_all[sample]} ({self.dataset_wrapper.class_names[self.y_all[sample].item()]}), prediction: [{pred_str}]")
-        nx.draw(g, ax=ax, node_color=colors,
-                labels={i: str(i) for i in range(labels.shape[0])}, font_color="whitesmoke")
-
-        if save_path is not None:
-            fig.savefig(save_path, bbox_inches='tight')
-        return fig
-
-    # Show neighbourhoods of nodes with the most similar embeddings
-    def show_nearest(self, sample: int, num_samples_per_concept=5, save_path=None):
-        return self.plot_closest_embeddings(self.x_out_all[self.batch_all == sample, :],
-                                            [f"Node {i}" for i in range(self.x_out_all[self.batch_all == sample, :].shape[0])],
-                                            num_plots=num_samples_per_concept, save_path=save_path)
-
-    # Show neighbourhoods of nodes whos embeddings are closest to the desired one-hot vector
-    def show_nearest_discretized(self, sample: int, num_samples_per_concept=5, save_path=None):
-        max_indices = np.argmax(self.x_out_all[self.batch_all == sample, :], axis=-1)
-        # [num_present_concepts, gnn_sizes[-1]]
-        present_concepts = np.eye(self.x_out_all.shape[1])[np.unique(max_indices), :]
-        labels = [None for _ in range(self.x_out_all.shape[1])]
-        for i in range(max_indices.shape[0]):
-            labels[max_indices[i]] = (f"Concept {max_indices[i]}, Nodes:\n" if labels[max_indices[i]] is None else
-                                      labels[max_indices[i]] + ", ") + str(i)
-
-        return self.plot_closest_embeddings(present_concepts, [l for l in labels if l is not None],
-                                            num_plots=num_samples_per_concept, save_path=save_path)
-
-    def plot_category_histogram(self, save_path=None):
-        counts = np.bincount(np.argmax(self.x_out_all, axis=1))
-        fig, ax = plt.subplots()
-        ax.bar(np.arange(counts.shape[0]), counts)
-        if save_path is not None:
-            fig.savefig(save_path, bbox_inches='tight')
-        return fig
-
-    def calculate_average_activation_shannon_entropy(self):
-        nonzero_logs = np.log2(self.x_out_all, out=np.zeros_like(self.x_out_all), where=(self.x_out_all != 0))
-        return np.mean(np.sum(-self.x_out_all * nonzero_logs, axis=1))
-
-    def _scatter_mean_and_std(self, values, indices):
-        # [num_nodes, k]
-        values = torch.tensor(values)
-        # [num_nodes]
-        indices = torch.tensor(indices)
-        # [num_unique_indices, k]
-        mean = scatter(values, indices, dim=0, reduce="mean")
-        squared_diff = torch.square(values - mean[indices])
-        squared_diff_sums = scatter(squared_diff, indices, dim=0, reduce="sum")
-        n = scatter(torch.ones_like(values), indices, dim=0, reduce="sum")
-        std = torch.sqrt(squared_diff_sums / (n - 1))
-        return mean.detach().numpy(), std.detach().numpy()
-
-
-    def plot_average_theta_and_h(self, save_path=None):
-        fig, ax = plt.subplots()
-        concepts = torch.tensor(np.argmax(self.x_out_all, axis=1))
-
-        # [num_concepts, num_classes], [num_concepts, num_classes]
-        mean_theta, std_theta = self._scatter_mean_and_std(self.theta_all, concepts)
-        # [num_concepts, 1], [num_concepts, 1]
-        mean_h, std_h = self._scatter_mean_and_std(self.h_all, concepts)
-
-        ax.errorbar(np.arange(mean_h.shape[0]), mean_h, std_h, linestyle='None')
-
-        if save_path is not None:
-            fig.savefig(save_path, bbox_inches='tight')
-        return fig
-
-
-    def plot_dropout_effect(self, save_path=None):
-        fig, ax = plt.subplots()
-        concepts = torch.tensor(np.argmax(self.x_out_all, axis=1))
-        scatter()
-
-        if save_path is not None:
-            fig.savefig(save_path, bbox_inches='tight')
-        return fig

@@ -19,6 +19,7 @@ class DatasetWrapper(seri.ArgSerializable, abc.ABC):
     def __init__(self, num_classes: int, num_node_features: int, is_directed: bool, max_nodes_per_graph: int, args: dict,
                  class_names: Optional[List[str]] = None):
         super().__init__(args)
+        ColorUtils.reset()
         self._dataset = None
         self.num_classes = num_classes
         self.num_node_features = num_node_features
@@ -77,6 +78,9 @@ class CustomDatasetWrapper(DatasetWrapper, abc.ABC):
                          sampler.class_names)
         self.sampler = sampler
         self.num_samples = num_samples
+        ColorUtils.set_feature_colors(torch.Tensor([
+            [18, 18, 18],
+            [52, 152, 219]]).float())
 
     def _get_dataset(self, dense: bool, min_nodes: int):
         def condition(d):
@@ -153,6 +157,21 @@ class BBBPAtomWrapper(PtFileWrapper):
         # https://github.com/DeepGraphLearning/torchdrug/issues/197
         # atom_types = [1, 5, 6, 7, 8, 9, 11, 15, 16, 17, 20, 35, 53]
         ColorUtils.feature_labels = ['H', 'B', 'C', 'N', 'O', 'F', 'Na', 'P', 'S', 'Cl', 'Ca', 'Br', 'I']
+        ColorUtils.set_feature_colors(torch.Tensor([
+            [52, 152, 219],
+            [142, 68, 173],
+            [44, 62, 80],
+            [205, 220, 57],
+            [231, 76, 60],
+            [243, 156, 18],
+            [232, 67, 147],
+            [96, 125, 139],
+            [142, 68, 173],
+            [39, 174, 96],
+            [0, 150, 136],
+            [121, 85, 72],
+            [127, 140, 141],
+        ]).float())
 
 class TUDatasetWrapper(PyGWrapper):
     def __init__(self, dataset_name: str, is_directed: bool, remove_edge_fts: bool = False, args=None,
@@ -170,6 +189,21 @@ class MutagWrapper(TUDatasetWrapper):
                          ["not mutagenic", "mutagenic"])
         #ColorUtils.rgb_feature_colors = None
         ColorUtils.feature_labels = ['C', 'O', 'Cl', 'H', 'N', 'F', 'Br', 'S', 'P', 'I', 'Na', 'K', 'Li', 'Ca']
+        ColorUtils.set_feature_colors(torch.Tensor([
+            [ 44,  62,  80],
+            [231,  76,  60],
+            [ 39, 174,  96],
+            [ 52, 152, 219],
+            [205, 220,  57],
+            [243, 156,  18],
+            [121,  85,  72],
+            [142,  68, 173],
+            [ 63,  81, 181],
+            [127, 140, 141],
+            [232,  67, 147],
+            [ 96, 125, 139],
+            [142,  68, 173],
+            [  0, 150, 136]]).float())
         #         self.color_map = np.array(
         #             ['#2c3e50', '#e74c3c', '#27ae60', '#3498db', '#CDDC39', '#f39c12', '#795548', '#8e44ad', '#3F51B5',
         #              '#7f8c8d', '#e84393', '#607D8B', '#8e44ad', '#009688'])
@@ -179,7 +213,21 @@ class MutagenicityWrapper(TUDatasetWrapper):
     def __init__(self, remove_edge_fts: bool = True):
         super().__init__("Mutagenicity", False, remove_edge_fts, dict(remove_edge_fts=remove_edge_fts),
                          ["not mutagenic", "mutagenic"])
-        # TODO set colors
+        ColorUtils.set_feature_colors(torch.Tensor([
+            [44, 62, 80],
+            [231, 76, 60],
+            [39, 174, 96],
+            [52, 152, 219],
+            [205, 220, 57],
+            [243, 156, 18],
+            [121, 85, 72],
+            [142, 68, 173],
+            [63, 81, 181],
+            [127, 140, 141],
+            [232, 67, 147],
+            [96, 125, 139],
+            [142, 68, 173],
+            [0, 150, 136]]).float())
         ColorUtils.feature_labels = ['C', 'O', 'Cl', 'H', 'N', 'F', 'Br', 'S', 'P', 'I', 'Na', 'K', 'Li', 'Ca']
 
 

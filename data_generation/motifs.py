@@ -359,8 +359,8 @@ class CircleMotif(Motif):
 
     @property
     def name(self):
-        return f"Circle ({self.num_nodes}" +\
-            ("" if self.max_nodes is None else f"-{self.max_nodes}, step={self.num_nodes_step}")
+        return f"Circle({self.num_nodes})" +\
+            ("" if self.nodes_upper_bound is None else f"-{self.nodes_upper_bound}, step={self.num_nodes_step}")
 
 
 class SetMotif(Motif):

@@ -156,10 +156,7 @@ def perturbed(func=None,
                 flat_batch_dim_shape = [-1] + list(input_shape)[1:]
                 perturbed_input = torch.reshape(perturbed_input, flat_batch_dim_shape)
                 # Calls user-defined function in a perturbation agnostic manner.
-                # TODO: This is ignoring everything but the output node embeddings. Needs to be changed to include the actual edges
                 perturbed_output = func(perturbed_input, *args)
-                other_outputs = perturbed_output[1:]
-                perturbed_output = perturbed_output[0]
                 # [NB, D1, ..., Dk] ->  [N, B, D1, ..., Dk].
                 perturbed_input = torch.reshape(perturbed_input, perturbed_input_shape)
                 # Either
@@ -177,10 +174,10 @@ def perturbed(func=None,
                 ctx.save_for_backward(perturbed_input, perturbed_output, noise_gradient)
                 ctx.original_input_shape = original_input_shape
 
-                return forward_output, *other_outputs
+                return forward_output
 
             @staticmethod
-            def backward(ctx, dy, *ignored_args):
+            def backward(ctx, dy):
                 # Pull saved tensors
                 original_input_shape = ctx.original_input_shape
                 perturbed_input, perturbed_output, noise_gradient = ctx.saved_tensors
@@ -198,6 +195,12 @@ def perturbed(func=None,
                 output = flatten(output)  # (N, B, D)
                 noise_grad = flatten(noise_grad)  # (N, B, D)
 
+                # Note: dy comes from the averaged outputs.
+                # N: number of samples, B: batch, D: input dimension but also output dimension?
+                # sum(noise_grad * sum(output * dy[None, :, :], dim=-1)[:, :, None], dim=0)
+                # = sum(sum(noise_grad * output * dy[None, :, :], dim=-1)[:, :, None], dim=0)
+                # Basically: for each output, separately take dot product with dy
+                # then, element-wise multiply with noise_grad (for Gaussian just the N(0,1) noise), a
                 g = torch.einsum('nbd,nb->bd', noise_grad, torch.einsum('nbd,bd->nb', output, dy))
                 g /= sigma * num_samples
                 return torch.reshape(g, original_input_shape)

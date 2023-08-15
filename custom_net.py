@@ -1,7 +1,7 @@
 import abc
 from argparse import Namespace
 from dataclasses import dataclass
-from typing import List, Type, Any, Tuple
+from typing import List, Type, Any, Tuple, Optional
 
 import torch
 import torch.nn.functional as F
@@ -38,7 +38,8 @@ class InferenceInfo:
 class CustomNet(torch.nn.Module, abc.ABC):
     def __init__(self, num_node_features: int, num_classes: int, args: Namespace, device,
                  output_layer_type: Type[Classifier], pooling_block_types: List[Type[PoolBlock]],
-                 conv_type: Type[torch.nn.Module], activation_function, directed_graphs: bool):
+                 conv_type: Type[torch.nn.Module], activation_function, directed_graphs: bool,
+                 state_dict: Optional[dict] = None):
         super().__init__()
         layer_sizes: List[List[int]] = args.layer_sizes
         pool_block_args: List[dict] = args.pool_block_args
@@ -55,7 +56,8 @@ class CustomNet(torch.nn.Module, abc.ABC):
                                           directed_graphs=directed_graphs,
                                           activation_function=activation_function,
                                           forced_embeddings=args.forced_embeddings,
-                                          transparency=args.blackbox_transparency)
+                                          transparency=args.blackbox_transparency,
+                                          state_dict=state_dict)
 
         num_output_nodes = pool_block_args[-1].get("num_output_nodes", None)
         output_dim = self.graph_network.pool_blocks[-1].output_dim

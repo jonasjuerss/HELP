@@ -1,7 +1,10 @@
 import math
+from typing import Optional
+
 import torch
 from time import time
 import numpy as np
+from torch.nn import UninitializedBuffer
 from torch_scatter import scatter
 
 import graphutils
@@ -39,7 +42,8 @@ class KMeans(torch.nn.Module):
         cluster centroids
     '''
 
-    def __init__(self, n_clusters, max_iter=100, tol=0.0001, verbose=0, mode="euclidean", minibatch=None, threshold=0):
+    def __init__(self, n_clusters, max_iter=100, tol=0.0001, verbose=0, mode="euclidean", minibatch=None, threshold=0,
+                 centroids: Optional[torch.Tensor] = None):
         super().__init__()
         self.n_clusters = n_clusters
         self.max_iter = max_iter
@@ -58,7 +62,7 @@ class KMeans(torch.nn.Module):
             self._pynvml_exist = True
         except ModuleNotFoundError:
             self._pynvml_exist = False
-        self.register_buffer("centroids", None)
+        self.register_buffer("centroids", centroids)
 
     @staticmethod
     def cos_sim(a, b):

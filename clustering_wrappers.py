@@ -61,7 +61,9 @@ class KMeansWrapper(ClusterAlgWrapper):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # For backward compatibility:
-        kwargs_map = dict(num_concepts="n_clusters", kmeans_threshold="threshold", cluster_threshold="threshold")
+        kwargs = {k.replace(".", "_"): v for k, v in kwargs.items()}
+        kwargs_map = dict(num_concepts="n_clusters", kmeans_threshold="threshold", cluster_threshold="threshold",
+                          kmeans_centroids="centroids")
         for k, v in kwargs_map.items():
             if k in kwargs:
                 kwargs[v] = kwargs[k]
@@ -153,14 +155,20 @@ class SequentialKMeansMeanShiftWrapper(ClusterAlgWrapper):
     """
 
     def __init__(self, num_sketches: int, mean_shift_range: float, min_samples_per_sketch: float,
-                 cluster_decay_factor: float = 1, rescale_clusters_decay: float = -1):
+                 cluster_decay_factor: float = 1, rescale_clusters_decay: float = -1,
+                 running_std: Optional[torch.Tensor] = None, sketches: Optional[torch.Tensor] = None,
+                 counts: Optional[torch.Tensor] = None, _centroids: Optional[torch.Tensor] = None):
         super().__init__()
         self.num_sketches = num_sketches
         self.decay_factor = cluster_decay_factor
         self.min_samples_per_sketch = min_samples_per_sketch
         self.mean_shift_range = mean_shift_range
-        self.initialized = False
+        self.initialized = _centroids is not None
         self.rescale_clusters_decay = rescale_clusters_decay
+        self.register_buffer("running_std", running_std)
+        self.register_buffer("sketches", sketches)
+        self.register_buffer("counts", counts)
+        self.register_buffer("_centroids", _centroids)
 
     def dense_mean_shift(self, X: torch.Tensor) -> torch.Tensor:
         """
@@ -188,14 +196,13 @@ class SequentialKMeansMeanShiftWrapper(ClusterAlgWrapper):
                 self.running_std = self.rescale_clusters_decay * self.running_std +\
                                    (1 - self.rescale_clusters_decay) * torch.std(X, dim=0, keepdim=True)
             else:
-                self.register_buffer("running_std",
-                                     (1 - self.rescale_clusters_decay) * torch.std(X, dim=0, keepdim=True))
+                self.running_std = torch.std(X, dim=0, keepdim=True)
             X = X / self.running_std
         if not self.initialized:
             kmeans = KMeans(n_clusters=self.num_sketches)
             closest = kmeans.fit_predict(X)
-            self.register_buffer("sketches", kmeans.centroids)
-            self.register_buffer("counts", torch.bincount(closest, minlength=self.num_sketches).float())
+            self.sketches = kmeans.centroids
+            self.counts = torch.bincount(closest, minlength=self.num_sketches).float()
         else:
             # [num_points, num_sketches]
             closest = torch.argmin(torch.cdist(X, self.sketches), dim=1)
@@ -211,19 +218,14 @@ class SequentialKMeansMeanShiftWrapper(ClusterAlgWrapper):
             self.sketches[update_mask] /= (new_counts[update_mask] + self.counts[update_mask])[:, None]
             self.counts += new_counts
 
-        _centroids = self.dense_mean_shift(self.sketches[self.counts >
-                                                         self.min_samples_per_sketch * torch.sum(self.counts), :])
-        if self.initialized:
-            self._centroids = _centroids
-        else:
-            self.register_buffer("_centroids", _centroids)
-            self.initialized = True
+        self._centroids = self.dense_mean_shift(self.sketches[self.counts >
+                                                              self.min_samples_per_sketch * torch.sum(self.counts), :])
 
     def fit_copy(self, X: torch.Tensor, train: bool = False) -> ClusterAlgWrapper:
         raise NotImplementedError()
 
     @property
-    def centroids(self, train: bool = False) -> torch.Tensor:
+    def centroids(self) -> torch.Tensor:
         # Note: in particular, the default predict() implementation will continue working because we scale here
         return self._centroids if self.rescale_clusters_decay == -1 else self._centroids * self.running_std
 
