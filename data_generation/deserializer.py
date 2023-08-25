@@ -12,6 +12,7 @@ __all__ = [motifs.HouseMotif, motifs.FullyConnectedMotif, motifs.BinaryTreeMotif
            custom_dataset.SimpleMotifCategorizationDataset,
 
            dataset_wrappers.CustomDatasetWrapper,
+           dataset_wrappers.ExpressivityWrapper,
            dataset_wrappers.TUDatasetWrapper,
            dataset_wrappers.MutagWrapper,
            dataset_wrappers.MutagenicityWrapper,

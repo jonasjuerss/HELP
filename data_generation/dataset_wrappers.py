@@ -10,13 +10,15 @@ from torch_geometric.transforms import ToDense, Compose, Constant
 
 import data_generation.serializer as seri
 from color_utils import ColorUtils
-from data_generation.custom_dataset import CustomDataset
+from data_generation.custom_dataset import CustomDataset, SimpleMotifCategorizationDataset
+from data_generation.motifs import ReplicationMotif, CircleMotif
 from data_generation.transforms import RemoveEdgeFeatures
 from graphutils import data_to_dense
 
 
 class DatasetWrapper(seri.ArgSerializable, abc.ABC):
-    def __init__(self, num_classes: int, num_node_features: int, is_directed: bool, max_nodes_per_graph: int, args: dict,
+    def __init__(self, num_classes: int, num_node_features: int, is_directed: bool, max_nodes_per_graph: int,
+                 args: dict,
                  class_names: Optional[List[str]] = None):
         super().__init__(args)
         ColorUtils.reset()
@@ -72,7 +74,7 @@ class DatasetWrapper(seri.ArgSerializable, abc.ABC):
 
 class CustomDatasetWrapper(DatasetWrapper, abc.ABC):
 
-    def __init__(self, sampler: CustomDataset, num_samples=4*(512 + 128)):
+    def __init__(self, sampler: CustomDataset, num_samples=4 * (512 + 128)):
         super().__init__(sampler.num_classes, sampler.num_node_features, False, sampler.max_nodes,
                          dict(sampler=sampler, num_samples=num_samples),
                          sampler.class_names)
@@ -87,6 +89,14 @@ class CustomDatasetWrapper(DatasetWrapper, abc.ABC):
             return d.num_nodes >= min_nodes
 
         return [self.sampler.sample(dense, condition) for _ in range(self.num_samples)]
+
+
+# For convenience
+class ExpressivityWrapper(CustomDatasetWrapper):
+    def __init__(self):
+        super().__init__(SimpleMotifCategorizationDataset(
+            [ReplicationMotif(CircleMotif(3, [0], 1, 20, 1), 2),
+             CircleMotif(6, [0], 1, 40, 2)]))
 
 
 class PyGWrapper(DatasetWrapper, abc.ABC):
@@ -107,6 +117,7 @@ class PyGWrapper(DatasetWrapper, abc.ABC):
         if min_nodes > 0:
             def condition(d):
                 return d.num_nodes >= min_nodes
+
             kwargs["pre_filter"] = condition
 
         for d in self.dummy_dataset:
@@ -140,6 +151,7 @@ class PtFileWrapper(DatasetWrapper):
     def _get_dataset(self, dense: bool, min_nodes: int):
         def condition(d):
             return d.num_nodes >= min_nodes
+
         transform = (lambda d: data_to_dense(d, max_nodes=self.max_nodes_per_graph)) if dense else (lambda x: x)
         dataset = [transform(d) for d in self.data_dict["data"] if condition(d)]
         random.Random(torch.seed()).shuffle(dataset)
@@ -173,6 +185,7 @@ class BBBPAtomWrapper(PtFileWrapper):
             [127, 140, 141],
         ]).float())
 
+
 class TUDatasetWrapper(PyGWrapper):
     def __init__(self, dataset_name: str, is_directed: bool, remove_edge_fts: bool = False, args=None,
                  class_names: Optional[List[str]] = None):
@@ -180,30 +193,31 @@ class TUDatasetWrapper(PyGWrapper):
         # explaining node and class labels
         if args is None:
             args = dict(dataset_name=dataset_name)
-        super().__init__(TUDataset, remove_edge_fts, is_directed, dict(root='/tmp', name=dataset_name), args, class_names)
+        super().__init__(TUDataset, remove_edge_fts, is_directed, dict(root='/tmp', name=dataset_name), args,
+                         class_names)
 
 
 class MutagWrapper(TUDatasetWrapper):
     def __init__(self, remove_edge_fts: bool = True):
         super().__init__("MUTAG", False, remove_edge_fts, dict(remove_edge_fts=remove_edge_fts),
                          ["not mutagenic", "mutagenic"])
-        #ColorUtils.rgb_feature_colors = None
+        # ColorUtils.rgb_feature_colors = None
         ColorUtils.feature_labels = ['C', 'O', 'Cl', 'H', 'N', 'F', 'Br', 'S', 'P', 'I', 'Na', 'K', 'Li', 'Ca']
         ColorUtils.set_feature_colors(torch.Tensor([
-            [ 44,  62,  80],
-            [231,  76,  60],
-            [ 39, 174,  96],
-            [ 52, 152, 219],
-            [205, 220,  57],
-            [243, 156,  18],
-            [121,  85,  72],
-            [142,  68, 173],
-            [ 63,  81, 181],
+            [44, 62, 80],
+            [231, 76, 60],
+            [39, 174, 96],
+            [52, 152, 219],
+            [205, 220, 57],
+            [243, 156, 18],
+            [121, 85, 72],
+            [142, 68, 173],
+            [63, 81, 181],
             [127, 140, 141],
-            [232,  67, 147],
-            [ 96, 125, 139],
-            [142,  68, 173],
-            [  0, 150, 136]]).float())
+            [232, 67, 147],
+            [96, 125, 139],
+            [142, 68, 173],
+            [0, 150, 136]]).float())
         #         self.color_map = np.array(
         #             ['#2c3e50', '#e74c3c', '#27ae60', '#3498db', '#CDDC39', '#f39c12', '#795548', '#8e44ad', '#3F51B5',
         #              '#7f8c8d', '#e84393', '#607D8B', '#8e44ad', '#009688'])

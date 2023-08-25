@@ -485,7 +485,7 @@ if __name__ == "__main__":
     parser.add_argument('--val_split', type=float, default=0.1,
                         help='Fraction of samples used for the validation set.')
 
-    parser.add_argument('--graph_log_freq', type=int, default=50,
+    parser.add_argument('--graph_log_freq', type=int, default=-1,
                         help='Every how many epochs to log graphs to wandb. The final predictions will always be '
                              'logged, except for if this is negative.')
     parser.add_argument('--formula_log_freq', type=int, default=50,
