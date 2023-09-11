@@ -1,5 +1,6 @@
 import dataclasses
 import math
+import random
 import re
 import warnings
 from dataclasses import dataclass
@@ -316,8 +317,9 @@ class Analyzer():
     def count_subgraphs(self, pool_step: int, load_part: float = 1, plot_num_nodes: bool = False,
                         plot_num_subgraphs: bool = True, min_occs_to_store: int = 10,
                         max_neighborhoods_to_store: int = 3, use_k_hop: bool = False, save_path: Optional[str] = None,
-                        seed: int = 1, inference_with_train: bool = False, use_only_test: bool = True, horizontal: bool = False,
-                        purity_threshold: float = 0.1):
+                        seed: int = 1, inference_with_train: bool = False, use_only_test: bool = True,
+                        horizontal: bool = False, purity_threshold: float = 0.1, merge_concepts: bool = True,
+                        max_occs_to_merge : int = 5, min_nodes_to_merge: int = 3, min_nodes_for_legen: int = 10):
         """
 
         :param pool_step:
@@ -385,7 +387,7 @@ class Analyzer():
         assignment = Analyzer.deterministic_concept_assignments(self.model, test_data["info_pooling_assignments"],
                                                                 None)[pool_step].cpu()
         num_hops = self.model.graph_network.pool_blocks[pool_step].receptive_field
-
+        adj.diagonal(dim1=-2, dim2=-1).copy_(0) # Remove self-loops
         checked = torch.logical_not(mask)  # masked nodes count as checked
         # Would easily be parallelizable over samples
         num_concepts = torch.max(assignment).item() + 1
@@ -468,7 +470,37 @@ class Analyzer():
         for key in buckets:
             for g, (counts, examples) in buckets[key].items():
                 subgraphs.append((g, counts, examples))
+
         subgraphs.sort(key=lambda x: torch.sum(x[1]), reverse=True)
+
+        ############################### Soften chart ####################################
+        matcher_type = iso.DiGraphMatcher if self.dataset_wrapper.is_directed else iso.GraphMatcher
+        if plot_num_nodes:
+            if plot_num_subgraphs:
+                raise ValueError("Can't plot simultaneously when merging")
+            plot_num_subgraphs = True
+            plot_num_nodes = False
+            subgraphs = [(sg, counts * sg.number_of_nodes(), examples) for (sg, counts, examples) in subgraphs]
+        if merge_concepts:
+            for concept in range(num_concepts):
+                concept_graphs = [sg for sg in subgraphs if sg[1][concept] > 0]
+                for i in reversed(range(len(concept_graphs))):
+                    superg, superg_counts, superg_neighborhoods = concept_graphs[i]
+                    if superg_counts[concept] > max_occs_to_merge:
+                        break
+                    for j in reversed(range(i)):
+                        subg, subg_counts, subg_neighborhoods = concept_graphs[j]
+                        if subg.number_of_nodes() >= min_nodes_to_merge and\
+                                matcher_type(superg, subg, node_match=iso.categorical_node_match("concept", None)).\
+                                        subgraph_is_isomorphic():
+                            subg_counts[concept] += superg_counts[concept]
+                            superg_counts[concept] = 0
+                            break
+
+            subgraphs = [sg for sg in subgraphs if torch.max(sg[1]) > 0]
+            # Needs to be sorted again after merging
+            subgraphs.sort(key=lambda x: torch.sum(x[1]), reverse=True)
+        #################################################################################
 
         if plot_num_subgraphs or plot_num_nodes:
             if horizontal:
@@ -481,19 +513,31 @@ class Analyzer():
             if plot_num_subgraphs:
                 ax_sub = axes if not plot_num_nodes else axes[0]
                 if horizontal:
-                    ax_sub.set_xlabel("assigned subgraphs")
+                    ax_sub.set_xlabel("assigned " + "nodes" if merge_concepts else "subgraphs")
                 else:
-                    ax_sub.set_ylabel("assigned subgraphs")
+                    ax_sub.set_ylabel("assigned " + "nodes" if merge_concepts else "subgraphs")
                 subgraph_threshold = 0.01 * num_subgraphs_total
             if plot_num_nodes:
                 ax_nodes = axes if not plot_num_subgraphs else axes[1]
-                nodes_threshold = 0.01 * torch.sum(mask)
+                # nodes_threshold = 0.01 * torch.sum(mask)
                 if horizontal:
                     ax_nodes.set_xlabel("assigned nodes")
                 else:
                     ax_nodes.set_ylabel("assigned nodes")
             bottom = torch.zeros(num_concepts, dtype=torch.int)
             bottom_numnodes = torch.zeros(num_concepts, dtype=torch.int)
+
+            # for ax in axes if plot_num_subgraphs and plot_num_nodes else [axes]:
+                # NUM_COLORS = len(subgraphs)
+                # cm = plt.get_cmap('nipy_spectral') # https://matplotlib.org/stable/tutorials/colors/colormaps.html
+                # colors = [cm(1. * i / NUM_COLORS) for i in range(NUM_COLORS)]
+                # random.shuffle(colors)
+                # colors = ["#41ff89", "#3822ca", "#b1f904", "#8220d4", "#d2ef00", "#000698", "#9fff56", "#bd3bee", "#00d643", "#f322dd", "#069700", "#ff42d1", "#8aff84", "#5c0091", "#62ffa1", "#9a0098", "#73ac00", "#0068f7", "#ffd222", "#0061db", "#fffe73", "#1f005b", "#e8ff8e", "#00247a", "#ffe97c", "#b77bff", "#00aa4e", "#ff52b4", "#01dc9f", "#ed0023", "#00d4f7", "#ff393b", "#01bc83", "#ff3c96", "#007721", "#ef94ff", "#406f00", "#478cff", "#eb7d00", "#009dfc", "#ff7030", "#004396", "#aca000", "#99007d", "#c3ffa6", "#500057", "#a1ffd2", "#da004f", "#02bfd2", "#ad1400", "#52c0ff", "#c84200", "#0081b7", "#c97900", "#00427e", "#ab8500", "#aaa6ff", "#758500", "#ff9ee2", "#017439", "#ff4962", "#007e67", "#c00050", "#d5ffed", "#190028", "#ffe999", "#003560", "#ffa75f", "#004777", "#fdffd5", "#440026", "#dff6ff", "#9a001f", "#afeaff", "#8c2b00", "#a7c8ff", "#4b6100", "#d9baff", "#003210", "#ff6f9c", "#005337", "#a3005a", "#007b87", "#890039", "#f3e0ff", "#33000d", "#ffcdc7", "#00211f", "#ffc1ef", "#5f5800", "#ffb0b9", "#2b0e00", "#ffc2a5", "#005068", "#ff9a7d", "#3f3100", "#ff908b", "#4a1d00", "#5f4600", "#6a3600"]
+                # colors = []
+                # for cmap in ["tab20", "tab20b", "tab20c"]:
+                #     cm = plt.get_cmap(cmap)
+                #     colors += [cm(1. * i / 20) for i in range(20)]
+                # ax.set_prop_cycle('color', colors)
 
             for i, (g, counts, _) in enumerate(subgraphs):
                 if plot_num_subgraphs:
@@ -504,14 +548,15 @@ class Analyzer():
                         ax_sub.bar(np.arange(num_concepts), counts, bottom=bottom,
                                    label=f"{i}" if torch.max(counts) >= subgraph_threshold else None)
                     bottom += counts
-                if plot_num_nodes:
+                if plot_num_nodes and not merge_concepts:
                     if horizontal:
                         ax_nodes.barh(np.arange(num_concepts), counts * g.number_of_nodes(), left=bottom_numnodes,
-                                      label=f"{i}" if torch.max(counts) * g.number_of_nodes() >= nodes_threshold else None)
+                                      label=f"{i}" if torch.max(counts) * g.number_of_nodes() >= min_nodes_for_legen else None)
                     else:
                         ax_nodes.bar(np.arange(num_concepts), counts * g.number_of_nodes(), bottom=bottom_numnodes,
-                                     label=f"{i}" if torch.max(counts) * g.number_of_nodes() >= nodes_threshold else None)
+                                     label=f"{i}" if torch.max(counts) * g.number_of_nodes() >= min_nodes_for_legen else None)
                     bottom_numnodes += counts * g.number_of_nodes()
+
             for ax in axes if plot_num_subgraphs and plot_num_nodes else [axes]:
                 if horizontal:
                     ax.set_ylabel("concept")
@@ -531,7 +576,7 @@ class Analyzer():
         for _, counts, _ in subgraphs:
             pure_concept_counts += torch.where(counts > purity_thresholds, counts, 0)
 
-        return subgraphs, torch.where(counts > 0, pure_concept_counts / counts, 1)
+        return subgraphs, torch.mean(pure_concept_counts[concept_counts != 0] / concept_counts[concept_counts != 0])
 
     @staticmethod
     def tuples_to_tensor(inputs: dict, **kwargs):
@@ -574,10 +619,13 @@ class Analyzer():
     @staticmethod
     def plot_extended_concept_examples(subgraphs: List[Tuple[nx.Graph, torch.Tensor, List[List[nx.Graph]]]],
                                        pool_step: int, num_concepts: int = 40, samples_per_concept: int = 3,
-                                       filter_subgraphs: Optional[List[int]] = None, save_path: Optional[str] = None):
+                                       filter_subgraphs: Optional[List[int]] = None,
+                                       filter_concepts: Optional[List[int]] = None, save_path: Optional[str] = None):
         split_concepts = []
         for subgraph_i, (_, counts, samples) in enumerate(subgraphs):
             for concept_i, count in enumerate(counts):
+                if filter_concepts is not None and concept_i not in filter_concepts:
+                    continue
                 if count > 0 and (filter_subgraphs is None or subgraph_i in filter_subgraphs):
                     split_concepts.append((subgraph_i, concept_i, count, samples[concept_i]))
         split_concepts.sort(key=lambda x: x[2], reverse=True)
