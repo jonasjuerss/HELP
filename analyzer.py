@@ -17,7 +17,6 @@ from functorch import vmap
 from matplotlib import pylab, pyplot as plt
 import torch
 from sklearn.base import BaseEstimator
-from sklearn.cluster import KMeans
 from sklearn.datasets import load_iris
 from sklearn.manifold import TSNE
 from torch.utils.data import Subset
@@ -35,6 +34,7 @@ from custom_net import InferenceInfo, CustomNet
 from data_generation.custom_dataset import HierarchicalMotifGraphTemplate
 from data_generation.dataset_wrappers import CustomDatasetWrapper
 from graphutils import adj_to_edge_index, mask_to_batch, one_hot
+from kmeans import KMeans
 from plotstyle import set_dim
 from poolblocks.poolblock import DenseNoPoolBlock, SparseNoPoolBlock, DiffPoolBlock, MonteCarloBlock, ASAPBlock
 from train import main
@@ -318,8 +318,9 @@ class Analyzer():
                         plot_num_subgraphs: bool = True, min_occs_to_store: int = 10,
                         max_neighborhoods_to_store: int = 3, use_k_hop: bool = False, save_path: Optional[str] = None,
                         seed: int = 1, inference_with_train: bool = False, use_only_test: bool = True,
-                        horizontal: bool = False, purity_threshold: float = 0.1, merge_concepts: bool = True,
-                        max_occs_to_merge : int = 5, min_nodes_to_merge: int = 3, min_nodes_for_legen: int = 10):
+                        horizontal: bool = False, purity_threshold: float = 0.1, merge_concepts: bool = False,
+                        max_occs_to_merge : int = 5, min_nodes_to_merge: int = 3, min_nodes_for_legend: int = 10,
+                        num_gcexplainer_clusters: Optional[int] = None, num_hops: Optional[int] = None):
         """
 
         :param pool_step:
@@ -340,11 +341,12 @@ class Analyzer():
         assert inference_with_train or use_only_test
         torch.manual_seed(seed)
         np.random.seed(seed)
-        required_fields = ["info_pooling_assignments"]
+        # technically, concepts is only needed for GCN/GCExplainer
+        required_fields = ["info_pooling_assignments", "concepts", "mask"]
         if pool_step != 0:
             required_fields += ["info_all_batch_or_mask", "info_adjs_or_edge_indices", "info_node_assignments"]
         else:
-            required_fields += ["x", "mask", "adj"]
+            required_fields += ["x", "adj"] # "mask",
 
         if inference_with_train:
             data_loader = self.train_loader.__class__(self.train_loader.dataset + self.test_loader.dataset, self.train_loader.batch_size)
@@ -385,8 +387,10 @@ class Analyzer():
         else:
             mask = mask.cpu()
         assignment = Analyzer.deterministic_concept_assignments(self.model, test_data["info_pooling_assignments"],
-                                                                None)[pool_step].cpu()
-        num_hops = self.model.graph_network.pool_blocks[pool_step].receptive_field
+                                                                [mask], test_data["concepts"], num_gcexplainer_clusters,
+                                                                )[pool_step].cpu()
+        if num_hops is None:
+            num_hops = self.model.graph_network.pool_blocks[pool_step].receptive_field
         adj.diagonal(dim1=-2, dim2=-1).copy_(0) # Remove self-loops
         checked = torch.logical_not(mask)  # masked nodes count as checked
         # Would easily be parallelizable over samples
@@ -475,12 +479,14 @@ class Analyzer():
 
         ############################### Soften chart ####################################
         matcher_type = iso.DiGraphMatcher if self.dataset_wrapper.is_directed else iso.GraphMatcher
+        counts_are_nodes = False
         if plot_num_nodes:
             if plot_num_subgraphs:
-                raise ValueError("Can't plot simultaneously when merging")
+                raise ValueError("Can't plot number of subgraphs and nodes simultaneously anymore!")
             plot_num_subgraphs = True
             plot_num_nodes = False
             subgraphs = [(sg, counts * sg.number_of_nodes(), examples) for (sg, counts, examples) in subgraphs]
+            counts_are_nodes = True
         if merge_concepts:
             for concept in range(num_concepts):
                 concept_graphs = [sg for sg in subgraphs if sg[1][concept] > 0]
@@ -513,9 +519,9 @@ class Analyzer():
             if plot_num_subgraphs:
                 ax_sub = axes if not plot_num_nodes else axes[0]
                 if horizontal:
-                    ax_sub.set_xlabel("assigned " + "nodes" if merge_concepts else "subgraphs")
+                    ax_sub.set_xlabel("assigned " + "nodes" if counts_are_nodes else "subgraphs")
                 else:
-                    ax_sub.set_ylabel("assigned " + "nodes" if merge_concepts else "subgraphs")
+                    ax_sub.set_ylabel("assigned " + "nodes" if counts_are_nodes else "subgraphs")
                 subgraph_threshold = 0.01 * num_subgraphs_total
             if plot_num_nodes:
                 ax_nodes = axes if not plot_num_subgraphs else axes[1]
@@ -543,18 +549,18 @@ class Analyzer():
                 if plot_num_subgraphs:
                     if horizontal:
                         ax_sub.barh(np.arange(num_concepts), counts, left=bottom,
-                                    label=f"{i}" if torch.max(counts) >= subgraph_threshold else None)
+                                    label=f"{i}" if torch.max(counts) >= min_nodes_for_legend else None)
                     else:
                         ax_sub.bar(np.arange(num_concepts), counts, bottom=bottom,
-                                   label=f"{i}" if torch.max(counts) >= subgraph_threshold else None)
+                                   label=f"{i}" if torch.max(counts) >= min_nodes_for_legend else None)
                     bottom += counts
                 if plot_num_nodes and not merge_concepts:
                     if horizontal:
                         ax_nodes.barh(np.arange(num_concepts), counts * g.number_of_nodes(), left=bottom_numnodes,
-                                      label=f"{i}" if torch.max(counts) * g.number_of_nodes() >= min_nodes_for_legen else None)
+                                      label=f"{i}" if torch.max(counts) * g.number_of_nodes() >= min_nodes_for_legend else None)
                     else:
                         ax_nodes.bar(np.arange(num_concepts), counts * g.number_of_nodes(), bottom=bottom_numnodes,
-                                     label=f"{i}" if torch.max(counts) * g.number_of_nodes() >= min_nodes_for_legen else None)
+                                     label=f"{i}" if torch.max(counts) * g.number_of_nodes() >= min_nodes_for_legend else None)
                     bottom_numnodes += counts * g.number_of_nodes()
 
             for ax in axes if plot_num_subgraphs and plot_num_nodes else [axes]:
@@ -576,7 +582,8 @@ class Analyzer():
         for _, counts, _ in subgraphs:
             pure_concept_counts += torch.where(counts > purity_thresholds, counts, 0)
 
-        return subgraphs, torch.mean(pure_concept_counts[concept_counts != 0] / concept_counts[concept_counts != 0])
+        return subgraphs, None if counts_are_nodes\
+            else torch.mean(pure_concept_counts[concept_counts != 0] / concept_counts[concept_counts != 0])
 
     @staticmethod
     def tuples_to_tensor(inputs: dict, **kwargs):
@@ -641,7 +648,9 @@ class Analyzer():
 
     @staticmethod
     def deterministic_concept_assignments(model: CustomNet, info_pooling_assignments: List[torch.Tensor],
-                                          masks: List[torch.Tensor]) -> List[torch.Tensor]:
+                                          masks: List[torch.Tensor],
+                                          concepts: Optional[List[torch.Tensor]] = None,
+                                          num_gcexplainer_clusters: Optional[int] = None) -> List[torch.Tensor]:
         dummy = model.graph_network.pool_blocks
         res = []
         for i, (block, ass) in enumerate(zip(model.graph_network.pool_blocks, info_pooling_assignments)):
@@ -659,7 +668,14 @@ class Analyzer():
                                           max_num_nodes=masks[i].shape[-1])[0])
             elif block.__class__ in [MonteCarloBlock]:
                 res.append(ass)
-            elif block.__class__ not in [SparseNoPoolBlock, DenseNoPoolBlock]:
+            elif block.__class__ == DenseNoPoolBlock:
+                if len(model.graph_network.pool_blocks) == 1 and concepts is not None:
+                    # GCEXplainer for pure GCN
+                    # Note that these are just the predictions of the last GNN layer
+                    sparse_assignments, _ = KMeans(num_gcexplainer_clusters).fit_predict(concepts[masks[0]])
+                    res.append(to_dense_batch(sparse_assignments, mask_to_batch(masks[0]),
+                                              max_num_nodes=concepts.shape[-2])[0])
+            elif block.__class__ not in [SparseNoPoolBlock]:
                 raise NotImplementedError(f"PoolBlock type not supported {block.__class__}")
         return res
 
@@ -767,7 +783,8 @@ class Analyzer():
 
     def calculate_concept_completeness(self, multiset: bool = True, data_part: float = 1.0, seeds: List[int] = [1],
                                        plot_tree: bool = False, max_depth: Optional[int] = None,
-                                       save_path: Optional[str] = None, verbose: bool = True) ->\
+                                       save_path: Optional[str] = None, verbose: bool = True,
+                                       num_gcexplainer_clusters: Optional[int] = None, **kwargs) ->\
             torch.Tensor:
         """
         Important: For the inputs, this assumes one-hot encoding
@@ -785,21 +802,33 @@ class Analyzer():
                                                       self.train_loader.batch_size)
 
             all_data = self.load_required_data(data_loader, 1, "joint train and test",
-                                                 ["x", "target", "info_pooling_assignments"])
+                                                 ["x", "target", "info_pooling_assignments", "concepts", "mask"])
             # enumerate_feat = 2 ** torch.arange(all_data["x"].shape[-1],
             #                                    device=all_data["x"].device)[None, None, :]
             # Note that I can't calculate concept completeness for ASAP anyway as I have no mapping from nodes to concepts.
             # so masks is not required in determinisitc_assignemnts
-            all_train_assignments = [torch.argmax(all_data["x"][:train_set_size], dim=-1)] +\
-                                    Analyzer.deterministic_concept_assignments(self.model,
-                                                                               [None if d is None else d[:train_set_size]
-                                                                                for d in all_data["info_pooling_assignments"]],
-                                                                               None)
-            all_test_assignments = [torch.argmax(all_data["x"][train_set_size:], dim=-1)] + \
-                                   Analyzer.deterministic_concept_assignments(self.model,
+
+
+            all_train_assignments = [torch.argmax(all_data["x"][:train_set_size], dim=-1)]
+
+            all_test_assignments = [torch.argmax(all_data["x"][train_set_size:], dim=-1)]
+
+            if True:
+                all_ass = Analyzer.deterministic_concept_assignments(self.model, all_data["info_pooling_assignments"],
+                                                                     [all_data["mask"]], all_data["concepts"],
+                                                                     num_gcexplainer_clusters)
+                all_train_assignments += [ass[:train_set_size] for ass in all_ass]
+                all_test_assignments += [ass[train_set_size:] for ass in all_ass]
+            else:
+                all_train_assignments += Analyzer.deterministic_concept_assignments(self.model,
+                                                           [None if d is None else d[:train_set_size]
+                                                            for d in all_data["info_pooling_assignments"]],
+                                                           None, None)
+                all_test_assignments += Analyzer.deterministic_concept_assignments(self.model,
                                                                               [None if d is None else d[train_set_size:]
                                                                                for d in all_data["info_pooling_assignments"]],
-                                                                              None)
+                                                                              None, None)
+
             result = []
             for pool_step, (train_assignments, test_assignments) in enumerate(zip(all_train_assignments,
                                                                                   all_test_assignments)):
