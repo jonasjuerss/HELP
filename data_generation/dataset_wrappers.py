@@ -154,7 +154,7 @@ class PtFileWrapper(DatasetWrapper):
 
         transform = (lambda d: data_to_dense(d, max_nodes=self.max_nodes_per_graph)) if dense else (lambda x: x)
         dataset = [transform(d) for d in self.data_dict["data"] if condition(d)]
-        random.Random(torch.seed()).shuffle(dataset)
+        random.Random(torch.initial_seed()).shuffle(dataset)
         return dataset
 
 

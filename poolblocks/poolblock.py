@@ -406,7 +406,8 @@ class MonteCarloBlock(PoolBlock):
                  forced_embeddings=None, directed_graphs: bool = True, cluster_alg: str = "KMeans",
                  final_bottleneck: typing.Optional[int] = None, global_clusters: bool = True, soft_sampling: float = 0,
                  clustering_loss_weight: float = 0.0, perturbation: typing.Optional[dict] = None,
-                 num_mc_samples: int = 1, transparency: float = 1, state_dict: typing.Optional[dict] = None, **kwargs):
+                 num_mc_samples: int = 1, transparency: float = 1, state_dict: typing.Optional[dict] = None,
+                 use_centroids_as_embedding: bool = False, **kwargs):
         """
 
         :param embedding_sizes:
@@ -448,6 +449,11 @@ class MonteCarloBlock(PoolBlock):
             typing.cast(PerturbingDistribution, deserializer.from_dict(perturbation))
         self.transparency = transparency
         self.last_num_clusters = None
+        self.use_centroids_as_embedding = use_centroids_as_embedding
+        if use_centroids_as_embedding and\
+                (self.num_mc_samples == 1 or self.perturbation is None or self.transparency != 1) and\
+                custom_logger.cpu_workers != 0:
+            raise NotImplementedError("Centroids as embeddings are not implemented for parallel workers!")
 
         self.num_mc_samples = num_mc_samples
         if num_mc_samples > 1 and soft_sampling == 0 and perturbation is None:
@@ -521,8 +527,15 @@ class MonteCarloBlock(PoolBlock):
                     exit()
         adj = adj.repeat(num_mc_samples, 1, 1)
 
-        # [batch_size * num_mc_samples, max_num_clusters] (repeat: [batch_size * num_mc_samples, num_nodes_max, num_features])
-        x_new = scatter(x.repeat(num_mc_samples, 1, 1), assignments[:, :, None], reduce="mean", dim=-2)[:, 1:, :]
+
+        if self.use_centroids_as_embedding:
+            scattered_x = self.cluster_alg.centroids[concept_assignments].repeat(num_mc_samples, 1, 1)
+            # [batch_size * num_mc_samples, max_num_clusters] (repeat: [batch_size * num_mc_samples, num_nodes_max, num_features])
+            # definitely not the most efficient way, as reduce is useless, just need inverse
+            x_new = scatter(scattered_x, assignments[:, :, None], reduce="mean", dim=-2)[:, 1:, :]
+        else:
+            # [batch_size * num_mc_samples, max_num_clusters] (repeat: [batch_size * num_mc_samples, num_nodes_max, num_features])
+            x_new = scatter(x.repeat(num_mc_samples, 1, 1), assignments[:, :, None], reduce="mean", dim=-2)[:, 1:, :]
         if self.final_bottleneck is not None:
             # Because both transformations are linear, this should be equivalent to applying it before pooling
             x_new = self.final_bottleneck(x_new)

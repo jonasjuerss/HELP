@@ -316,19 +316,15 @@ class Analyzer():
             raise ValueError("Node features are expected to be one-hot!")
 
     @staticmethod
-    def plot_single_concept_examples(examples: List[nx.Graph], pool_step: int) -> PIL.Image:
-        fig, axes = plt.subplots(1, len(examples), figsize=(3 * len(examples), 3))
+    def plot_single_concept_examples(examples: List[nx.Graph], pool_step: int, width_scale: float = 1.0) -> PIL.Image:
+        fig, axes = plt.subplots(1, len(examples), figsize=(3 * len(examples) * width_scale, 3))
         if len(examples) == 1:
             axes = [axes]
         for i, ex in enumerate(examples):
             Analyzer.plot_nx_concept_graph(ex, pool_step, ax=axes[i])
             axes[i].grid(False)
-        # fig.subplots_adjust(left=500, bottom=500, right=500, top=500)
-        fig.tight_layout()
-        # fig.set_facecolor('None')
-        # fig.set_alpha(1.0)
+        fig.subplots_adjust(top=1, bottom=0, right=1, left=0, hspace=0, wspace=0)
         fig.canvas.draw()
-        # fig.set_alpha(1.0)
         return PIL.Image.frombytes('RGB', fig.canvas.get_width_height(), fig.canvas.tostring_rgb())
 
     def count_subgraphs(self, pool_step: int, load_part: float = 1, plot_num_nodes: bool = False,
@@ -338,7 +334,8 @@ class Analyzer():
                         horizontal: bool = False, purity_threshold: float = 0.1, merge_concepts: bool = False,
                         max_occs_to_merge: int = 5, min_nodes_to_merge: int = 3, min_nodes_for_legend: int = 10,
                         num_gcexplainer_clusters: Optional[int] = None, num_hops: Optional[int] = None,
-                        plot_example_graphs: bool = True):
+                        plot_example_graphs: bool = True, example_scale: float = 0.8, example_width_scale: float = 1.0,
+                        padding: float = 0.01):
         """
 
         :param pool_step:
@@ -359,6 +356,7 @@ class Analyzer():
         assert inference_with_train or use_only_test
         torch.manual_seed(seed)
         np.random.seed(seed)
+        random.seed(seed)
         # technically, concepts is only needed for GCN/GCExplainer
         required_fields = ["info_pooling_assignments", "concepts", "mask"]
         if pool_step != 0:
@@ -509,13 +507,15 @@ class Analyzer():
             plot_num_nodes = False
             subgraphs = [(sg, counts * sg.number_of_nodes(), examples) for (sg, counts, examples) in subgraphs]
             counts_are_nodes = True
+        total_counts = torch.sum(torch.stack([counts for (_, counts, _) in subgraphs]), dim=0)  # TODO remove sanity check
         if merge_concepts:
             for concept in range(num_concepts):
                 concept_graphs = [sg for sg in subgraphs if sg[1][concept] > 0]
+                concept_graphs.sort(key=lambda x: x[1][concept], reverse=True)
                 for i in reversed(range(len(concept_graphs))):
                     superg, superg_counts, superg_neighborhoods = concept_graphs[i]
                     if superg_counts[concept] > max_occs_to_merge:
-                        break
+                        continue
                     for j in reversed(range(i)):
                         subg, subg_counts, subg_neighborhoods = concept_graphs[j]
                         if subg.number_of_nodes() >= min_nodes_to_merge and \
@@ -523,13 +523,16 @@ class Analyzer():
                                         subgraph_is_isomorphic():
                             subg_counts[concept] += superg_counts[concept]
                             superg_counts[concept] = 0
+                            total_counts_new = torch.sum(torch.stack([counts for (_, counts, _) in subgraphs]),
+                                                         dim=0)  # TODO remove sanity check
+                            if not torch.all(total_counts_new == total_counts):
+                                print(total_counts, total_counts_new)
                             break
 
             subgraphs = [sg for sg in subgraphs if torch.max(sg[1]) > 0]
             # Needs to be sorted again after merging
             subgraphs.sort(key=lambda x: torch.sum(x[1]), reverse=True)
         #################################################################################
-
         if plot_num_subgraphs or plot_num_nodes:
             if horizontal:
                 figsize = (8.27, 11.69)
@@ -569,8 +572,8 @@ class Analyzer():
 
             total_counts = torch.sum(torch.stack([counts for (_, counts, _) in subgraphs]), dim=0)
             max_count = torch.max(total_counts).item()
-            relative_subg_width = round((0.8 * figsize[1] / num_concepts) * (max_count / figsize[0]))
-
+            relative_subg_size = round((example_scale * figsize[1] / num_concepts) * (max_count / figsize[0]))
+            padding *= relative_subg_size # so it becomes relative to the width
             for i, (g, counts, example_graphs) in enumerate(subgraphs):
                 if plot_num_subgraphs:
                     if horizontal:
@@ -578,13 +581,19 @@ class Analyzer():
                                     label=f"{i}" if torch.max(counts) >= min_nodes_for_legend else None)
                         if plot_example_graphs:
                             for concept in range(num_concepts):
-                                num_examples = min(counts[concept] // relative_subg_width, len(example_graphs[concept]))
-                                if num_examples == 0:
+                                num_examples = min( # 0.01: part of width used as padding
+                                    math.floor((counts[concept] - 2 * padding) / (example_width_scale * relative_subg_size)),
+                                    len(example_graphs[concept]))
+                                if num_examples <= 0:
                                     continue
-                                img = Analyzer.plot_single_concept_examples(example_graphs[concept][:num_examples], pool_step)
-                                ax_sub.imshow(img, extent=[bottom[concept] + 2,
-                                                           bottom[concept] + 2 + relative_subg_width * num_examples,
-                                                           concept - 0.35, concept + 0.35], aspect='auto', zorder=2)
+                                img = Analyzer.plot_single_concept_examples(example_graphs[concept][:num_examples],
+                                                                            pool_step, example_width_scale)
+                                ax_sub.imshow(img, extent=[bottom[concept] + padding,
+                                                           bottom[concept] - padding +\
+                                                           relative_subg_size * example_width_scale * num_examples,
+                                                           concept - (example_scale / 2),
+                                                           concept + (example_scale / 2)],
+                                              aspect='auto', zorder=2)
 
                     else:
                         ax_sub.bar(np.arange(num_concepts), counts, bottom=bottom,
